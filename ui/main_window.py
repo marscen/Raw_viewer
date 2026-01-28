@@ -1,4 +1,4 @@
-from PyQt6.QtWidgets import (QMainWindow, QFileDialog, QMessageBox, QLabel)
+from PyQt6.QtWidgets import (QMainWindow, QFileDialog, QMessageBox, QLabel, QDockWidget)
 from PyQt6.QtGui import QImage, QAction
 from PyQt6.QtCore import Qt
 import numpy as np
@@ -6,6 +6,7 @@ import os
 
 from ui.canvas import ImageCanvas
 from ui.dialogs import ImageParamsDialog
+from ui.sidebar import ImageControlPanel
 from utils.image_loader import load_raw_image, apply_bayer_mask
 
 class MainWindow(QMainWindow):
@@ -23,13 +24,34 @@ class MainWindow(QMainWindow):
         self.statusBar().addWidget(self.status_label)
         self.canvas.pixel_hovered.connect(self.status_label.setText)
         
-        # Menu
-        file_menu = self.menuBar().addMenu("File")
+        # Current file state
+        self.current_file_path = None
         
+        # Sidebar (Dock)
+        self.sidebar = ImageControlPanel()
+        self.dock = QDockWidget("Controls", self)
+        self.dock.setWidget(self.sidebar)
+        self.dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.LeftDockWidgetArea)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock)
+        self.dock.setVisible(False) # Hide by default
+        
+        # Connect Sidebar
+        self.sidebar.params_changed.connect(self.reload_image_with_params)
+        
+        # Menu
+        menu_bar = self.menuBar()
+        file_menu = menu_bar.addMenu("File")
+        view_menu = menu_bar.addMenu("View")
+        
+        # File Actions
         open_action = QAction("Open RAW...", self)
         open_action.setShortcut("Ctrl+O")
         open_action.triggered.connect(self.open_raw_file)
         file_menu.addAction(open_action)
+        
+        # View Actions
+        toggle_view_action = self.dock.toggleViewAction()
+        view_menu.addAction(toggle_view_action)
         
     def open_raw_file(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Open RAW File", "", "RAW Files (*.raw *.bin *.bayer);;All Files (*)")
@@ -40,7 +62,14 @@ class MainWindow(QMainWindow):
         dialog = ImageParamsDialog(self)
         if dialog.exec():
             params = dialog.get_params()
+            self.current_file_path = file_path # Store path
             self.load_image(file_path, params)
+            # Sync sidebar
+            self.sidebar.set_params(params)
+            
+    def reload_image_with_params(self, params):
+        if self.current_file_path:
+            self.load_image(self.current_file_path, params)
             
     def load_image(self, file_path, params):
         try:
