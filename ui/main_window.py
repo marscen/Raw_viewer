@@ -6,7 +6,7 @@ import os
 
 from ui.canvas import ImageCanvas
 from ui.dialogs import ImageParamsDialog
-from utils.image_loader import load_raw_image
+from utils.image_loader import load_raw_image, apply_bayer_mask
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -60,15 +60,31 @@ class MainWindow(QMainWindow):
 
             # Convert to QImage
             # display_data is uint8 numpy array (H, W)
-            # We need to construct QImage. Format_Grayscale8 is best for single channel
-            q_img = QImage(display_data.data, width, height, width, QImage.Format.Format_Grayscale8)
+            # We need to construct QImage. 
+            
+            # Check pattern
+            pattern = params.get('pattern', 'Mono/None')
+            if pattern in ["RGGB", "BGGR", "GRBG", "GBRG"]:
+                # Colorize
+                rgb_data = apply_bayer_mask(raw_data, pattern, bit_depth)
+                # QImage.Format_RGB888 needs contiguous data
+                if not rgb_data.flags['C_CONTIGUOUS']:
+                     rgb_data = np.ascontiguousarray(rgb_data)
+                     
+                height, width, _ = rgb_data.shape
+                # QImage from RGB888
+                q_img = QImage(rgb_data.data, width, height, 3 * width, QImage.Format.Format_RGB888)
+            else:
+                # Grayscale
+                # Format_Grayscale8 is best for single channel
+                q_img = QImage(display_data.data, width, height, width, QImage.Format.Format_Grayscale8)
             
             # Start strict separation: QImage buffer must persist or be copied. 
             # Passing numpy buffer directly to QImage is risky if numpy array is garbage collected.
             # safe approach: .copy()
             self.display_image = q_img.copy()
             
-            self.canvas.set_image(self.display_image, raw_data)
+            self.canvas.set_image(self.display_image, raw_data, pattern)
             self.status_label.setText(f"Loaded: {width}x{height}, {bit_depth}-bit")
             
         except Exception as e:

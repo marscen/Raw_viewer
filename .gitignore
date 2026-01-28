@@ -8,3 +8,5 @@
 /.venv
 ._*
 .DS_Store
+/ui/__pycache__/
+/utils/__pycache__/

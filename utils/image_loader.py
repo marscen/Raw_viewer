@@ -40,3 +40,57 @@ def load_raw_image(file_path, width, height, bit_depth):
     except Exception as e:
         print(f"Error loading image: {e}")
         return None, None
+
+def apply_bayer_mask(raw_data, pattern, bit_depth):
+    """
+    Applies Bayer mask to raw data to produce a color-coded image (mosaic).
+    Returns (H, W, 3) uint8 image.
+    """
+    height, width = raw_data.shape
+    
+    # Normalize to 8-bit
+    max_val = (2 ** bit_depth) - 1
+    # Use float to avoid overflow before normalization
+    normalized = (raw_data.astype(np.float32) / max_val * 255).astype(np.uint8)
+    
+    # Create RGB image
+    image_rgb = np.zeros((height, width, 3), dtype=np.uint8)
+    
+    # Pattern logic
+    # 0 = Red, 1 = Green, 2 = Blue
+    
+    pattern = pattern.upper()
+    
+    if pattern == "RGGB":
+        # R G
+        # G B
+        image_rgb[0::2, 0::2, 0] = normalized[0::2, 0::2] # R
+        image_rgb[0::2, 1::2, 1] = normalized[0::2, 1::2] # G
+        image_rgb[1::2, 0::2, 1] = normalized[1::2, 0::2] # G
+        image_rgb[1::2, 1::2, 2] = normalized[1::2, 1::2] # B
+        
+    elif pattern == "BGGR":
+        # B G
+        # G R
+        image_rgb[0::2, 0::2, 2] = normalized[0::2, 0::2] # B
+        image_rgb[0::2, 1::2, 1] = normalized[0::2, 1::2] # G
+        image_rgb[1::2, 0::2, 1] = normalized[1::2, 0::2] # G
+        image_rgb[1::2, 1::2, 0] = normalized[1::2, 1::2] # R
+        
+    elif pattern == "GRBG":
+        # G R
+        # B G
+        image_rgb[0::2, 0::2, 1] = normalized[0::2, 0::2] # G
+        image_rgb[0::2, 1::2, 0] = normalized[0::2, 1::2] # R
+        image_rgb[1::2, 0::2, 2] = normalized[1::2, 0::2] # B
+        image_rgb[1::2, 1::2, 1] = normalized[1::2, 1::2] # G
+        
+    elif pattern == "GBRG":
+        # G B
+        # R G
+        image_rgb[0::2, 0::2, 1] = normalized[0::2, 0::2] # G
+        image_rgb[0::2, 1::2, 2] = normalized[0::2, 1::2] # B
+        image_rgb[1::2, 0::2, 0] = normalized[1::2, 0::2] # R
+        image_rgb[1::2, 1::2, 1] = normalized[1::2, 1::2] # G
+        
+    return image_rgb

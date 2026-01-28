@@ -11,6 +11,7 @@ class ImageCanvas(QWidget):
         super().__init__(parent)
         self.image = None # This will hold the QImage for display
         self.raw_data = None # This will hold the original raw numpy array
+        self.pattern = None # Bayer pattern
         
         # Interaction state
         self.scale = 1.0
@@ -21,9 +22,10 @@ class ImageCanvas(QWidget):
         self.setMouseTracking(True) # Enable mouse tracking for pixel info
         self.setBackgroundRole(QPalette.ColorRole.NoRole) # Handle background painting manually
         
-    def set_image(self, q_image, raw_data):
+    def set_image(self, q_image, raw_data, pattern=None):
         self.image = q_image
         self.raw_data = raw_data
+        self.pattern = pattern
         self.scale = 1.0
         self.offset = QPoint(0, 0)
         
@@ -113,19 +115,13 @@ class ImageCanvas(QWidget):
         # Draw Text
         # We need check if raw_data exists and matches dimensions
         if self.raw_data is not None:
-             painter.setPen(QColor(255, 255, 0)) # Yellow text
-             # We need a font that scales well to small sizes, or we construct a path.
-             # Alternative: Turn off scaling, calculate screen coords manually for text.
-             # That is usually cleaner for text.
-             
-             # Let's Save state, reset transform for text, draw text?
-             # But then we need to map coords manually.
              painter.save()
              painter.resetTransform()
              
              # Set font for screen coordinates
              f = QFont("Monospace")
              f.setPixelSize(12) # 12px on screen
+             f.setBold(True)
              painter.setFont(f)
              
              for y in range(start_y, end_y):
@@ -133,15 +129,67 @@ class ImageCanvas(QWidget):
                      if y < self.raw_data.shape[0] and x < self.raw_data.shape[1]:
                          val = self.raw_data[y, x]
                          # Calculate screen position
-                         # sx = x * scale + offset.x
-                         # sy = y * scale + offset.y
                          sx = x * self.scale + self.offset.x()
                          sy = y * self.scale + self.offset.y()
                          
                          rect = QRectF(sx, sy, self.scale, self.scale)
+                         
+                         # Determine Color
+                         text_color = QColor(255, 255, 0) # Default Yellow
+                         if self.pattern and self.pattern not in ["Mono/None", None]:
+                             channel = self.get_bayer_channel(x, y, self.pattern)
+                             if channel == 0: # R
+                                 text_color = QColor(255, 80, 80)
+                             elif channel == 1: # G
+                                 text_color = QColor(80, 255, 80)
+                             elif channel == 2: # B
+                                 text_color = QColor(80, 80, 255)
+                         
+                         # Draw Shadow/Outline for visibility
+                         shadow_offset = 1
+                         painter.setPen(Qt.GlobalColor.black)
+                         # Draw shadow at +1, +1
+                         shadow_rect = rect.translated(shadow_offset, shadow_offset)
+                         painter.drawText(shadow_rect, Qt.AlignmentFlag.AlignCenter, str(val))
+                         
+                         # Draw Main Text
+                         painter.setPen(text_color)
                          painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, str(val))
              
              painter.restore()
+
+    def get_bayer_channel(self, x, y, pattern):
+        # 0=R, 1=G, 2=B
+        pattern = pattern.upper()
+        # Row parity, Col parity
+        r = y % 2
+        c = x % 2
+        
+        if pattern == "RGGB":
+            # R G
+            # G B
+            if r == 0: return 0 if c == 0 else 1
+            else:      return 1 if c == 0 else 2
+            
+        elif pattern == "BGGR":
+            # B G
+            # G R
+            if r == 0: return 2 if c == 0 else 1
+            else:      return 1 if c == 0 else 0
+
+        elif pattern == "GRBG":
+            # G R
+            # B G
+            if r == 0: return 1 if c == 0 else 0
+            else:      return 2 if c == 0 else 1
+            
+        elif pattern == "GBRG":
+            # G B
+            # R G
+            if r == 0: return 1 if c == 0 else 2
+            else:      return 0 if c == 0 else 1
+            
+        return -1
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
