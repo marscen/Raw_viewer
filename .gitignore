@@ -6,3 +6,5 @@
 /._ui
 /._utils
 /.venv
+._*
+.DS_Store
