@@ -10,3 +10,4 @@
 .DS_Store
 /ui/__pycache__/
 /utils/__pycache__/
+/algorithms/__pycache__/

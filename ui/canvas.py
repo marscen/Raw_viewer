@@ -6,12 +6,14 @@ import numpy as np
 class ImageCanvas(QWidget):
     # Signal to report pixel info (x, y, value) to status bar
     pixel_hovered = pyqtSignal(str)
+    view_changed = pyqtSignal(float, QPoint)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.image = None # This will hold the QImage for display
         self.raw_data = None # This will hold the original raw numpy array
         self.pattern = None # Bayer pattern
+        self.overlays = [] # List of overlays to draw
         
         # Interaction state
         self.scale = 1.0
@@ -34,6 +36,16 @@ class ImageCanvas(QWidget):
              # Logic to center can go here, or just reset to 0,0
              pass
         self.update()
+        self.view_changed.emit(self.scale, self.offset)
+
+    def set_view_params(self, scale, offset):
+        self.scale = scale
+        self.offset = offset
+        self.update()
+
+    def set_overlays(self, overlays):
+        self.overlays = overlays
+        self.update()
 
     def paintEvent(self, event: QPaintEvent):
         painter = QPainter(self)
@@ -50,6 +62,9 @@ class ImageCanvas(QWidget):
         
         # Draw Image
         painter.drawImage(0, 0, self.image)
+        
+        # Draw Overlays
+        self.draw_overlays(painter)
         
         # Draw Pixel Grid and Values if zoomed in enough
         # Threshold: e.g., when 1 pixel is at least 20 screen pixels
@@ -158,6 +173,48 @@ class ImageCanvas(QWidget):
              
              painter.restore()
 
+    def draw_overlays(self, painter):
+        if not self.overlays:
+            return
+
+        painter.save()
+        # Transform already applied in paintEvent
+        
+        # We need to ensure pen width is consistent regardless of scale or not? 
+        # Usually we want marked pixels to look like marked pixels.
+        # But if we draw a point at x,y with size 1, it will scale with the image.
+        
+        # Common requirement: "Crosshair" or "Box" around the pixel.
+        
+        for overlay in self.overlays:
+            color_name = overlay.get("color", "red")
+            color = QColor(color_name)
+            pen = QPen(color)
+            
+            # Make line width independent of scale?
+            # pen.setWidthF(1.0 / self.scale) 
+            # If we want a 2px boundary around a pixel regardless of zoom? No, usually we want it to wrap the pixel in image space.
+            # So width 0 or 1.0 in image space is correct.
+            pen.setWidthF(1.0) # 1 pixel in image coordinates
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+
+            otype = overlay.get("type")
+            coords = overlay.get("coords")
+            
+            if otype == "point":
+                x, y = coords
+                # Draw a rect around the pixel
+                painter.drawRect(QRectF(x, y, 1, 1))
+            elif otype == "line":
+                x1, y1, x2, y2 = coords
+                painter.drawLine(QPoint(int(x1), int(y1)), QPoint(int(x2), int(y2)))
+            elif otype == "rect":
+                x, y, w, h = coords
+                painter.drawRect(QRectF(x, y, w, h))
+                
+        painter.restore()
+
     def get_bayer_channel(self, x, y, pattern):
         # 0=R, 1=G, 2=B
         pattern = pattern.upper()
@@ -218,6 +275,7 @@ class ImageCanvas(QWidget):
             self.offset += delta
             self.last_mouse_pos = event.pos()
             self.update()
+            self.view_changed.emit(self.scale, self.offset)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -255,3 +313,4 @@ class ImageCanvas(QWidget):
         self.offset = QPoint(int(new_offset_x), int(new_offset_y))
         
         self.update()
+        self.view_changed.emit(self.scale, self.offset)
