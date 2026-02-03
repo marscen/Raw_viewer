@@ -44,6 +44,9 @@ class ImageControlPanel(QWidget):
         self.pattern_combo.currentTextChanged.connect(self.emit_params)
         form_layout.addRow("Pattern:", self.pattern_combo)
         
+        self.pattern_combo.currentTextChanged.connect(self.emit_params)
+        form_layout.addRow("Pattern:", self.pattern_combo)
+        
         group.setLayout(form_layout)
         layout.addWidget(group)
         layout.addStretch()
@@ -61,6 +64,9 @@ class ImageControlPanel(QWidget):
         
     def get_params(self):
         return {
+            "width": self.width_spin.value(),
+            "height": self.height_spin.value(),
+            "bit_depth": int(self.bit_depth_combo.currentText()),
             "width": self.width_spin.value(),
             "height": self.height_spin.value(),
             "bit_depth": int(self.bit_depth_combo.currentText()),

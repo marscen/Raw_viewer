@@ -1,5 +1,7 @@
 import numpy as np
 
+
+
 def load_raw_image(file_path, width, height, bit_depth):
     """
     Loads a headerless RAW image and converts it to a normalized 8-bit numpy array.
@@ -94,3 +96,4 @@ def apply_bayer_mask(raw_data, pattern, bit_depth):
         image_rgb[1::2, 1::2, 1] = normalized[1::2, 1::2] # G
         
     return image_rgb
+

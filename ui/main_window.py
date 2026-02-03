@@ -82,6 +82,13 @@ class MainWindow(QMainWindow):
         open_ref_action = QAction("Open Reference Image...", self)
         open_ref_action.triggered.connect(self.open_reference_file)
         file_menu.addAction(open_ref_action)
+
+        file_menu.addSeparator()
+
+        export_action = QAction("Export Image...", self)
+        export_action.setShortcut("Ctrl+E")
+        export_action.triggered.connect(self.export_image)
+        file_menu.addAction(export_action)
         
         # View Actions
         toggle_view_action = self.dock.toggleViewAction()
@@ -121,6 +128,10 @@ class MainWindow(QMainWindow):
             
         try:
             self.status_label.setText(f"Running {algo_name}...")
+            
+            # Inject current pattern
+            params['pattern'] = self.canvas.pattern
+            
             # Run algorithm
             result = algo.run(self.canvas.raw_data, params)
             
@@ -250,3 +261,51 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Ref Load Error: {str(e)}")
             self.status_label.setText("Error.")
+
+    def export_image(self):
+        if self.canvas.image is None and self.canvas.raw_data is None:
+            QMessageBox.warning(self, "Warning", "No image loaded to export.")
+            return
+
+        file_path, filter_selected = QFileDialog.getSaveFileName(
+            self, 
+            "Export Image", 
+            "", 
+            "Bitmap (*.bmp);;RAW Data (*.raw *.bin)"
+        )
+
+        if not file_path:
+            return
+
+        try:
+            self.status_label.setText(f"Exporting to {os.path.basename(file_path)}...")
+            
+            # Check filter or extension
+            if "Bitmap" in filter_selected or file_path.lower().endswith('.bmp'):
+                if self.canvas.image is None:
+                    raise Exception("No display image available for BMP export.")
+                
+                # Save QImage
+                if not self.canvas.image.save(file_path, "BMP"):
+                    raise Exception("Failed to save BMP file.")
+                    
+            elif "RAW Data" in filter_selected or file_path.lower().endswith(('.raw', '.bin')):
+                if self.canvas.raw_data is None:
+                    raise Exception("No raw data available for RAW export.")
+                
+                # Save Raw Data
+                # Ensure it's contiguous and flattened if needed, or just tofile which works on any array
+                self.canvas.raw_data.tofile(file_path)
+            
+            else:
+                # Fallback based on extension if user typed it manually without filter match
+                # Default to BMP if image fits, else RAW? 
+                # Let's keep it simple: if extension unknown, error or try QImage
+                self.canvas.image.save(file_path)
+
+            self.status_label.setText("Export successful.")
+            QMessageBox.information(self, "Export", "Image exported successfully.")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", f"Failed to export: {str(e)}")
+            self.status_label.setText("Export failed.")

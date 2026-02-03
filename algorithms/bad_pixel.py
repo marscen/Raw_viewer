@@ -28,75 +28,131 @@ class BadPixelDetectionAlgorithm(Algorithm):
 
     def run(self, image_data: np.ndarray, params: dict):
         threshold = params.get("threshold", 100)
-        # visualize_only = params.get("visualize_only", True)
-        
-        # Simple detection: Pixel differs from median of 3x3 neighborhood by more than threshold
-        # For performance on python, this might be slow on large images without optimization.
-        # We'll use openCV or scipy if available, but for now let's try a numpy vector approach or simple loops for demo.
-        # Actually, let's just do a very simple check against global mean/std for "Hot" pixels as a placeholder 
-        # because 3x3 median filter in pure numpy without scipy.ndimage is verbose to write efficiently.
-        
-        # Let's assume we can use basic numpy operations. 
-        # A simple "hot pixel" check: pixel > mean + N*std or just absolute threshold.
-        # Let's do a basic local neighbor check using splicing.
-        
-        # NOTE: This is a simplified educational implementation. 
-        # Real BPC uses median filters.
-        
-        h, w = image_data.shape
-        bad_pixels = []
-        
-        # Minimal viable demo: Detect pixels > 99% of max dynamic range or simply outliers.
-        # Let's try to implement a 3x3 median-ish check using splicing (ignoring borders)
-        
-        # Center
-        center = image_data[1:-1, 1:-1].astype(np.float32)
-        
-        # Neighbors
-        n1 = image_data[0:-2, 0:-2]
-        n2 = image_data[0:-2, 1:-1]
-        n3 = image_data[0:-2, 2:]
-        n4 = image_data[1:-1, 0:-2]
-        n5 = image_data[1:-1, 2:]
-        n6 = image_data[2:, 0:-2]
-        n7 = image_data[2:, 1:-1]
-        n8 = image_data[2:, 2:]
-        
-        # Stack neighbors
-        neighbors = np.array([n1, n2, n3, n4, n5, n6, n7, n8])
-        med_val = np.median(neighbors, axis=0)
-        
-        diff = np.abs(center - med_val)
-        
-        # Make boolean mask
-        mask = diff > threshold
-        
-        # Get coordinates
-        # np.where returns tuple of arrays (row_indices, col_indices)
-        # Remember we shifted by 1
-        y_idxs, x_idxs = np.where(mask)
-        
-        # Adjust for splicing offset
-        y_idxs += 1
-        x_idxs += 1
+        pattern = params.get("pattern", "Mono/None")
         
         overlays = []
-        # Limit the number of overlays to avoid crashing UI if everything is detected
-        limit = 1000
-        count = 0
+        limit = 2000 # Increased limit
         
-        for y, x in zip(y_idxs, x_idxs):
-            if count >= limit:
-                break
-            overlays.append({
-                "type": "point",
-                "coords": (int(x), int(y)),
-                "color": "red"
-            })
-            count += 1
+        # Check if we should split channels
+        if pattern in ["RGGB", "BGGR", "GRBG", "GBRG"]:
+            # Per-channel processing
+            # 0: R, 1: Gr, 2: Gb, 3: B (conceptually, we just want 4 2x2 offsets)
             
+            # Offsets for 2x2 grid: (0,0), (0,1), (1,0), (1,1)
+            offsets = [(0,0), (0,1), (1,0), (1,1)]
+            
+            h, w = image_data.shape
+            
+            running_count = 0
+            
+            for dy, dx in offsets:
+                # Slicing: start:stop:step
+                # Sub-image for this channel
+                sub_img = image_data[dy::2, dx::2]
+                
+                # Detect on sub-image
+                bad_mask = self.detect_on_plane(sub_img, threshold)
+                
+                # Map back to global coordinates
+                y_idxs, x_idxs = np.where(bad_mask)
+                
+                # Global coords: 
+                # global_y = sub_y * 2 + dy
+                # global_x = sub_x * 2 + dx
+                
+                # We can iterate and add
+                for sy, sx in zip(y_idxs, x_idxs):
+                    if running_count >= limit:
+                        break
+                    
+                    gy = sy * 2 + dy
+                    gx = sx * 2 + dx
+                    
+                    overlays.append({
+                        "type": "point",
+                        "coords": (int(gx), int(gy)),
+                        "color": "red"
+                    })
+                    running_count += 1
+                
+                if running_count >= limit:
+                    break
+                    
+        else:
+            # Mono image - full plane processing
+            bad_mask = self.detect_on_plane(image_data, threshold)
+            y_idxs, x_idxs = np.where(bad_mask)
+            
+            count = 0
+            for y, x in zip(y_idxs, x_idxs):
+                if count >= limit:
+                    break
+                overlays.append({
+                    "type": "point",
+                    "coords": (int(x), int(y)),
+                    "color": "red"
+                })
+                count += 1
+
         return {
-            "image": image_data, # Return original for now (or corrected if implemented)
+            "image": image_data,
             "overlays": overlays,
-            "message": f"Detected {len(y_idxs)} bad pixels (showing first {limit})."
+            "message": f"Detected {len(overlays)}+ bad pixels."
         }
+
+    def detect_on_plane(self, plane: np.ndarray, threshold: int) -> np.ndarray:
+        # 3x3 median filter check using neighbor splicing
+        # Ignore borders for simplicity
+        
+        # Center (crop by 1 all around)
+        center = plane[1:-1, 1:-1].astype(np.float32)
+        
+        # Neighbors
+        neighbors = []
+        for dy in [-1, 0, 1]:
+            for dx in [-1, 0, 1]:
+                if dy == 0 and dx == 0:
+                    continue
+                # Slice: 1+dy : -1+dy (but need to handle end index properly)
+                # simpler: slice from [1+dy : h-1+dy, 1+dx : w-1+dx] if we knew h,w
+                # Let's use negative indexing carefuly.
+                
+                # if dy=-1, slice 0:-2. if dy=1, slice 2:. if dy=0, slice 1:-1
+                s_y = slice(1+dy, -1+dy) if (1+dy) < (-1+dy) else slice(1+dy, None if -1+dy == 0 else -1+dy) 
+                # Wait, slice logic is tricky with negative indices.
+                
+                # Explicit start/end
+                # We want a view of size (H-2, W-2)
+                # Original range [1 : -1] -> indices 1 .. H-2
+                # Neighbor at dy,dx relative to (y,x) is at (y+dy, x+dx)
+                # So we want indices (1+dy) .. (H-2+dy)
+                
+                # Python slicing: start : stop
+                # stop is exclusive.
+                # if slicing [1:-1], we get items 1 through H-2. Length H-2.
+                # neighbor slice start: 1+dy. Stop: -1+dy (if -1+dy is 0, use None? No, 0 is start).
+                # Actually -1 is the last element. We want up to (but not including) the last-shifted.
+                
+                # Let's use explicit shape math to be safe.
+                h, w = plane.shape
+                # Target shape: h-2, w-2
+                
+                n_slice = plane[1+dy : h-1+dy, 1+dx : w-1+dx]
+                neighbors.append(n_slice)
+        
+        # Stack
+        stack = np.array(neighbors)
+        # Median
+        med_val = np.median(stack, axis=0)
+        
+        # Difference
+        diff = np.abs(center - med_val)
+        
+        # Mask
+        local_mask = diff > threshold
+        
+        # Pad back to original size
+        full_mask = np.zeros_like(plane, dtype=bool)
+        full_mask[1:-1, 1:-1] = local_mask
+        
+        return full_mask

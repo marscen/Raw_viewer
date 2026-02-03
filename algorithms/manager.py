@@ -1,5 +1,6 @@
 from .base import Algorithm
 from .bad_pixel import BadPixelDetectionAlgorithm
+from .bad_line import BadLineDetectionAlgorithm
 
 class AlgorithmManager:
     """
@@ -12,6 +13,7 @@ class AlgorithmManager:
     def _register_default_algorithms(self):
         """Registers built-in algorithms."""
         self.register(BadPixelDetectionAlgorithm())
+        self.register(BadLineDetectionAlgorithm())
 
     def register(self, algorithm: Algorithm):
         """Registers an algorithm instance."""
