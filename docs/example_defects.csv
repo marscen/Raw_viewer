@@ -1,0 +1,17 @@
+﻿type,x,y,channel,value,delta,note,source
+hot,268,48,R,1023,957.0,single,Bad Pixel Detection
+cluster,538,528,R,1023,956.0,cluster x4,Bad Pixel Detection
+dead,396,624,R,0,-59.0,single,Bad Pixel Detection
+hot,1190,796,R,1023,960.5,single,Bad Pixel Detection
+dead,89,76,Gr,0,-64.0,single,Bad Pixel Detection
+hot,115,86,Gr,1023,959.5,single,Bad Pixel Detection
+cluster,537,528,Gr,1023,958.0,cluster x4,Bad Pixel Detection
+hot,665,576,Gr,1023,957.0,single,Bad Pixel Detection
+hot,12,9,Gb,1023,958.5,single,Bad Pixel Detection
+cluster,538,529,Gb,1023,958.0,cluster x4,Bad Pixel Detection
+cluster,537,529,B,1023,957.0,cluster x4,Bad Pixel Detection
+row,0,355,Gb,214,75.16,row from cluster x1280（Δ 为中值法估计，幅度以坏线检测为准）,Bad Pixel Detection
+col,422,0,Gb,244,90.31,col from cluster x960（Δ 为中值法估计，幅度以坏线检测为准）,Bad Pixel Detection
+cluster,422,355,Gb,60,-79.5,"cluster x4 bbox(420,353)-(424,357)",Bad Pixel Detection
+col,422,0,Gb,244.5,180.51,full col,Bad Line Detection
+row,0,355,B,213.8,149.12,full row,Bad Line Detection
