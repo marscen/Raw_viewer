@@ -1,99 +1,51 @@
+"""兼容层：保留早期 utils.image_loader 的三个函数接口。
+
+真正的实现已经搬到 utils/raw_io.py（读盘）与 utils/display.py（显示变换），
+这里只做转发，避免两份逻辑各自演化（历史上 demosaic 的 shift bug 就是因为
+同一功能有多个副本）。老脚本 `from utils.image_loader import load_raw_image`
+仍然可用。
+"""
+from __future__ import annotations
+
 import numpy as np
 
+from utils.display import DisplayParams, bayer_colorize, demosaic, render_display
+from utils.raw_io import RawReadError, RawLoadSpec, load_raw
+
+__all__ = ["load_raw_image", "apply_bayer_mask", "demosaic_image"]
+
+
+def _normalize8(raw: np.ndarray, bit_depth: int) -> np.ndarray:
+    """按满量程线性归一化到 8bit（旧的显示约定）。"""
+    max_val = (1 << int(bit_depth)) - 1
+    params = DisplayParams(bit_depth=int(bit_depth), view="Mono",
+                           stretch="Fixed (black/white)", black_level=0,
+                           white_level=max_val)
+    img, _ = render_display(raw, params)
+    return img
 
 
 def load_raw_image(file_path, width, height, bit_depth):
-    """
-    Loads a headerless RAW image and converts it to a normalized 8-bit numpy array.
+    """读取裸 RAW，返回 (8bit 显示图, 原始 DN 数组)。
+
+    读盘失败时保持旧行为：打印错误并返回 (None, None)。
     """
     try:
-        # Determine data type based on bit depth
-        if bit_depth <= 8:
-            dtype = np.uint8
-        elif bit_depth <= 16:
-            dtype = np.uint16
-        else:
-            raise ValueError("Unsupported bit depth")
-        
-        # Read data from file
-        raw_data = np.fromfile(file_path, dtype=dtype)
-        
-        # Check if dimensions match file size
-        expected_size = width * height
-        if raw_data.size != expected_size:
-             # Try to adjust if file is larger (maybe has header or extra data, but we strictly read W*H here? 
-             # Or typically raw files are exact. Let's warn or just slice.)
-             if raw_data.size > expected_size:
-                 raw_data = raw_data[:expected_size]
-             else:
-                 raise ValueError(f"File size too small for dimensions {width}x{height}")
-
-        # Reshape
-        image = raw_data.reshape((height, width))
-        
-        # Normalize to 8-bit for display purposes
-        # If 10, 12, 14, 16 bit, we typically shift or scale. 
-        # Simple scaling: (value / max_val) * 255
-        max_val = (2 ** bit_depth) - 1
-        normalized_image = (image.astype(np.float32) / max_val * 255).astype(np.uint8)
-        
-        return normalized_image, image # Return both display version and original raw data
-        
-    except Exception as e:
-        print(f"Error loading image: {e}")
+        spec = RawLoadSpec(width=int(width), height=int(height), bit_depth=int(bit_depth))
+        raw = load_raw(file_path, spec)
+    except (RawReadError, OSError, ValueError) as exc:
+        print(f"Error loading image: {exc}")
         return None, None
+    return _normalize8(raw, bit_depth), raw
+
 
 def apply_bayer_mask(raw_data, pattern, bit_depth):
-    """
-    Applies Bayer mask to raw data to produce a color-coded image (mosaic).
-    Returns (H, W, 3) uint8 image.
-    """
-    height, width = raw_data.shape
-    
-    # Normalize to 8-bit
-    max_val = (2 ** bit_depth) - 1
-    # Use float to avoid overflow before normalization
-    normalized = (raw_data.astype(np.float32) / max_val * 255).astype(np.uint8)
-    
-    # Create RGB image
-    image_rgb = np.zeros((height, width, 3), dtype=np.uint8)
-    
-    # Pattern logic
-    # 0 = Red, 1 = Green, 2 = Blue
-    
-    pattern = pattern.upper()
-    
-    if pattern == "RGGB":
-        # R G
-        # G B
-        image_rgb[0::2, 0::2, 0] = normalized[0::2, 0::2] # R
-        image_rgb[0::2, 1::2, 1] = normalized[0::2, 1::2] # G
-        image_rgb[1::2, 0::2, 1] = normalized[1::2, 0::2] # G
-        image_rgb[1::2, 1::2, 2] = normalized[1::2, 1::2] # B
-        
-    elif pattern == "BGGR":
-        # B G
-        # G R
-        image_rgb[0::2, 0::2, 2] = normalized[0::2, 0::2] # B
-        image_rgb[0::2, 1::2, 1] = normalized[0::2, 1::2] # G
-        image_rgb[1::2, 0::2, 1] = normalized[1::2, 0::2] # G
-        image_rgb[1::2, 1::2, 0] = normalized[1::2, 1::2] # R
-        
-    elif pattern == "GRBG":
-        # G R
-        # B G
-        image_rgb[0::2, 0::2, 1] = normalized[0::2, 0::2] # G
-        image_rgb[0::2, 1::2, 0] = normalized[0::2, 1::2] # R
-        image_rgb[1::2, 0::2, 2] = normalized[1::2, 0::2] # B
-        image_rgb[1::2, 1::2, 1] = normalized[1::2, 1::2] # G
-        
-    elif pattern == "GBRG":
-        # G B
-        # R G
-        image_rgb[0::2, 0::2, 1] = normalized[0::2, 0::2] # G
-        image_rgb[0::2, 1::2, 2] = normalized[0::2, 1::2] # B
-        image_rgb[1::2, 0::2, 0] = normalized[1::2, 0::2] # R
-        image_rgb[1::2, 1::2, 1] = normalized[1::2, 1::2] # G
-        
-    return image_rgb
+    """Bayer 马赛克着色预览：按相位把灰度值染成 R/G/B。"""
+    return bayer_colorize(_normalize8(raw_data, bit_depth), pattern)
 
+
+def demosaic_image(raw_data, pattern, bit_depth):
+    """双线性插值 demosaic，返回 8bit RGB。"""
+    norm = _normalize8(raw_data, bit_depth).astype(np.float32)
+    rgb = demosaic(norm, pattern)
+    return np.clip(np.rint(rgb), 0, 255).astype(np.uint8)
