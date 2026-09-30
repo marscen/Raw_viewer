@@ -28,8 +28,14 @@ from utils.raw_io import (PACKING_MODES, RawLoadSpec, describe_file,
 SETTINGS_PRESET_KEY = "raw_viewer/presets"
 
 
+def _settings():
+    """和主窗口共用同一个设置后端（支持 RAWV2_SETTINGS_DIR 便携模式/测试隔离）。"""
+    from ui.main_window import make_settings
+    return make_settings()
+
+
 def load_presets() -> dict:
-    settings = QSettings("RAWViewer", "RawViewer")
+    settings = _settings()
     raw = settings.value(SETTINGS_PRESET_KEY, "")
     if not raw:
         return {}
@@ -40,8 +46,7 @@ def load_presets() -> dict:
 
 
 def save_presets(presets: dict):
-    QSettings("RAWViewer", "RawViewer").setValue(
-        SETTINGS_PRESET_KEY, json.dumps(presets, ensure_ascii=False))
+    _settings().setValue(SETTINGS_PRESET_KEY, json.dumps(presets, ensure_ascii=False))
 
 
 class ImageParamsDialog(QDialog):

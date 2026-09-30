@@ -21,7 +21,8 @@ from PyQt6.QtGui import (QPainter, QImage, QPaintEvent, QColor, QPen, QBrush,
                          QFont, QPalette)
 from PyQt6.QtWidgets import QWidget
 
-from utils import cfa
+from ui.qtutil import mono_font, safe_paint
+from utils import accel, cfa
 
 # 通道文字颜色（与绘图控件保持一致）
 _TEXT_COLORS = {
@@ -82,6 +83,7 @@ class ImageCanvas(QWidget):
         self.max_overlay_draw = 40000
         self._press_pos = None
         self._user_zoomed = False
+        self.high_quality_downscale = True   # 缩小时用 INTER_AREA（噪点图看起来干净得多）
 
         self.setMouseTracking(True)
         self.setBackgroundRole(QPalette.ColorRole.NoRole)
@@ -284,6 +286,7 @@ class ImageCanvas(QWidget):
     # ------------------------------------------------------------------
     # 绘制
     # ------------------------------------------------------------------
+    @safe_paint
     def paintEvent(self, event: QPaintEvent):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor(38, 40, 44))
@@ -317,13 +320,20 @@ class ImageCanvas(QWidget):
                 sub = np.ascontiguousarray(sub)
                 qimg = self._make_qimage(sub)
             else:
-                qimg = self._make_qimage(
-                    np.ascontiguousarray(self._src_np[iy0:iy1, ix0:ix1]))
+                sub = np.ascontiguousarray(self._src_np[iy0:iy1, ix0:ix1])
                 tw = max(1, int(round((ix1 - ix0) * n)))
                 th = max(1, int(round((iy1 - iy0) * n)))
-                if qimg is not None and (tw != qimg.width() or th != qimg.height()):
-                    qimg = qimg.scaled(tw, th, Qt.AspectRatioMode.IgnoreAspectRatio,
-                                       Qt.TransformationMode.FastTransformation)
+                resized = None
+                if self.high_quality_downscale and (tw != sub.shape[1] or th != sub.shape[0]):
+                    # 区域平均：RAW 噪声图缩小时不会像最近邻那样糊成马赛克
+                    resized = accel.resize_area(sub, tw, th)
+                if resized is not None:
+                    qimg = self._make_qimage(resized)
+                else:
+                    qimg = self._make_qimage(sub)
+                    if qimg is not None and (tw != qimg.width() or th != qimg.height()):
+                        qimg = qimg.scaled(tw, th, Qt.AspectRatioMode.IgnoreAspectRatio,
+                                           Qt.TransformationMode.FastTransformation)
             if qimg is not None:
                 qimg.setDevicePixelRatio(dpr)
                 painter.drawImage(QPointF(px / dpr, py / dpr), qimg)
@@ -431,7 +441,7 @@ class ImageCanvas(QWidget):
         painter.drawRect(rect)
         # 尺寸标签
         label = f"ROI {rx1 - rx0}x{ry1 - ry0} @({rx0},{ry0})"
-        painter.setFont(QFont("Monospace", 10))
+        painter.setFont(mono_font(10))
         fm = painter.fontMetrics()
         tw = fm.horizontalAdvance(label) + 8
         box = QRectF(rect.left(), max(0, rect.top() - 18), tw, 16)
@@ -514,10 +524,7 @@ class ImageCanvas(QWidget):
             return
         painter.save()
         painter.resetTransform()
-        font = QFont("Monospace")
-        font.setPixelSize(12)
-        font.setBold(True)
-        painter.setFont(font)
+        painter.setFont(mono_font(12, bold=True))
 
         rh, rw = self.raw_data.shape[0], self.raw_data.shape[1]
         for y in range(start_y, end_y):
@@ -554,7 +561,12 @@ class ImageCanvas(QWidget):
         start_roi = (event.button() == Qt.MouseButton.RightButton or
                      (event.button() == Qt.MouseButton.LeftButton and self.roi_enabled))
         if start_roi and self._src_np is not None:
+            # 起点也要夹进画内：从灰色区域起拖会让 ROI 出现负坐标，
+            # 状态栏标签与实际统计区域（会被 stats 夹紧）对不上
             x, y = self._pick_pixel(pos)
+            ih, iw = self._src_np.shape[0], self._src_np.shape[1]
+            x = min(max(x, 0), iw)
+            y = min(max(y, 0), ih)
             self._roi_dragging = True
             self._roi_start = (x, y)
             self._roi_cursor = (x, y)
@@ -571,26 +583,29 @@ class ImageCanvas(QWidget):
         if self._src_np is not None:
             ix, iy = self._pick_pixel(pos)
             ih, iw = self.raw_data.shape if self.raw_data is not None else (0, 0)
-            inside_show = 0 <= ix < self._src_np.shape[1] and 0 <= iy < self._src_np.shape[0]
-            if inside_show:
+            inside = (0 <= ix < self._src_np.shape[1] and 0 <= iy < self._src_np.shape[0])
+            if inside:
+                changed = self.hover_pixel != (ix, iy)
                 self.hover_pixel = (ix, iy)
-                val = None
-                if self.raw_data is not None and 0 <= ix < iw and 0 <= iy < ih:
-                    val = int(self.raw_data[iy, ix])
-                info = {
-                    "x": ix, "y": iy, "value": val,
-                    "channel": cfa.plane_name_at(ix, iy, self.pattern),
-                    "pattern": self.pattern,
-                }
-                self.hover_info.emit(info)
-                self.pixel_hovered.emit(
-                    f"X: {ix}, Y: {iy} | {info['channel']}: {val}")
-            else:
+                # 只有跨到另一个像素才更新状态栏/重绘：鼠标在同一像素内移动时
+                # 每帧重绘整幅图（放大时含数值文字）纯属浪费
+                if changed:
+                    val = None
+                    if self.raw_data is not None and 0 <= ix < iw and 0 <= iy < ih:
+                        val = int(self.raw_data[iy, ix])
+                    info = {"x": ix, "y": iy, "value": val,
+                            "channel": cfa.plane_name_at(ix, iy, self.pattern),
+                            "pattern": self.pattern}
+                    self.hover_info.emit(info)
+                    self.pixel_hovered.emit(f"X: {ix}, Y: {iy} | {info['channel']}: {val}")
+                    if not self.is_panning and not self._roi_dragging:
+                        self.update()          # 刷新十字线
+            elif self.hover_pixel is not None:
                 self.hover_pixel = None
                 self.pixel_hovered.emit("")
                 self.hover_info.emit(None)
-            if not self.is_panning and not self._roi_dragging:
-                self.update()          # 刷新十字线
+                if not self.is_panning:
+                    self.update()
 
         if self._roi_dragging:
             x, y = self._pick_pixel(pos)
@@ -632,7 +647,9 @@ class ImageCanvas(QWidget):
             self._press_pos = None
             if (event.button() == Qt.MouseButton.LeftButton and was_panning
                     and (event.position().toPoint() - press).manhattanLength() <= 3):
-                x, y = self._pick_pixel(event.position().toPoint())
+                # 用**按下**位置选点（和 ROI 锚点一致）：手抖 1~2 像素时
+                # 用松开位置会选到隔壁像素
+                x, y = self._pick_pixel(press)
                 if self.raw_data is not None:
                     ih, iw = self.raw_data.shape
                     if 0 <= x < iw and 0 <= y < ih:
@@ -642,7 +659,11 @@ class ImageCanvas(QWidget):
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self.zoom_to(1.0 if self.scale < 1.0 else 1.0, event.position())
+            # 双击语义：没到 1:1 就跳到 1:1，已经放大过就适应窗口
+            if self.scale < 1.0:
+                self.zoom_to(1.0, event.position())
+            else:
+                self.fit_to_window()
 
     def wheelEvent(self, event):
         self.zoom_step(1 if event.angleDelta().y() > 0 else -1, event.position())

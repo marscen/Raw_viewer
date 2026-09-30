@@ -27,6 +27,9 @@ ZOOM_CHOICES = [
 ]
 
 _NUMBER_RE = re.compile(r"\d+")
+# 负号/小数必须显式判为非法：re.findall(r"\d+") 会把 "-5,10" 读成 (5,10)、
+# 把 "12.5,7" 读成 (12,5)，然后"成功地"跳到错误坐标上
+_BAD_FORMAT_RE = re.compile(r"-|\d+\s*\.\s*\d+|\.|[eE]\s*\d")
 
 
 class CoordinateJumpBox(QWidget):
@@ -46,6 +49,7 @@ class CoordinateJumpBox(QWidget):
         self.edit.setFixedWidth(130)
         self.edit.setToolTip(
             "支持 1234,567 / 1234 567 / (1234, 567) / x=1234 y=567\n"
+            "（负数/小数/科学计数法会被判为非法，避免静默跳到错误坐标）\n"
             "X = 列号，Y = 行号，默认从 0 开始（可勾选 1-based）\n"
             "回车即跳转；Ctrl+G 可快速聚焦到本输入框")
         self.edit.returnPressed.connect(self._on_go)
@@ -74,7 +78,10 @@ class CoordinateJumpBox(QWidget):
     # ------------------------------------------------------------------
     def parse(self):
         """解析输入，返回 (x, y)（始终是 0-based 的内部坐标），非法返回 None。"""
-        nums = _NUMBER_RE.findall(self.edit.text() or "")
+        text = self.edit.text() or ""
+        if _BAD_FORMAT_RE.search(text):
+            return None                      # 负号/小数：宁可标红也不要跳错地方
+        nums = _NUMBER_RE.findall(text)
         if len(nums) < 2:
             return None
         x, y = int(nums[0]), int(nums[1])

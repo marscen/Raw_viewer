@@ -14,7 +14,8 @@ from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout,
                              QGroupBox, QHBoxLayout, QLabel, QPushButton,
                              QSpinBox, QVBoxLayout, QWidget)
 
-from utils import display as D
+from ui.qtutil import mono_style
+from utils import accel, display as D
 
 LAYOUT_KEYS = ("width", "height", "bit_depth", "packing", "header_bytes",
                "stride_bytes", "endian", "data_shift", "frame_index",
@@ -70,6 +71,16 @@ class DisplayControlPanel(QWidget):
         self.white_spin.setDecimals(0); self.white_spin.setSingleStep(1)
         self.white_spin.setToolTip("0 = 自动使用 (2^bit_depth - 1)")
         self.roi_stretch_check = QCheckBox("电平按 ROI 计算")
+        # 局部对比度增强（CLAHE）：暗场/低对比画面里看结构用
+        self.clahe_check = QCheckBox("局部对比度 CLAHE")
+        self.clahe_check.setToolTip("分块自适应直方图均衡，暗场/低对比时能看清结构；"
+                                    "有 OpenCV 时用它，否则退化为全局均衡")
+        self.clahe_clip = QDoubleSpinBox(); self.clahe_clip.setRange(0.5, 10.0)
+        self.clahe_clip.setValue(2.0); self.clahe_clip.setSingleStep(0.5)
+        self.clahe_clip.setToolTip("对比度限制：越大越激进（噪声也会被放大）")
+        self.clahe_tiles = QSpinBox(); self.clahe_tiles.setRange(2, 32)
+        self.clahe_tiles.setValue(8)
+        self.clahe_tiles.setToolTip("分块数：越大越局部（也越慢）")
         vform.addRow("视图:", self.view_combo)
         vform.addRow("拉伸:", self.stretch_combo)
         vform.addRow("百分位 low/high:", self._pair(self.p_low_spin, self.p_high_spin))
@@ -80,6 +91,8 @@ class DisplayControlPanel(QWidget):
         vform.addRow("伪彩:", self.colormap_combo)
         vform.addRow("", self.invert_check)
         vform.addRow("", self.roi_stretch_check)
+        vform.addRow("", self.clahe_check)
+        vform.addRow("CLAHE clip/tiles:", self._pair(self.clahe_clip, self.clahe_tiles))
         layout.addWidget(view_group)
 
         btns = QHBoxLayout()
@@ -92,8 +105,12 @@ class DisplayControlPanel(QWidget):
         layout.addLayout(btns)
 
         self.level_label = QLabel("level: -")
-        self.level_label.setStyleSheet("color: #9ad; font-family: monospace;")
+        self.level_label.setStyleSheet(mono_style("color: #9ad;"))
         layout.addWidget(self.level_label)
+        self.backend_label = QLabel(accel.backend_info())
+        self.backend_label.setStyleSheet(mono_style("color: #8a8;"))
+        self.backend_label.setWordWrap(True)
+        layout.addWidget(self.backend_label)
         layout.addStretch()
 
         # 信号
@@ -108,6 +125,9 @@ class DisplayControlPanel(QWidget):
             w.valueChanged.connect(self._emit_render)
         self.invert_check.toggled.connect(self._emit_render)
         self.roi_stretch_check.toggled.connect(self._emit_render)
+        self.clahe_check.toggled.connect(self._emit_render)
+        self.clahe_clip.valueChanged.connect(self._emit_render)
+        self.clahe_tiles.valueChanged.connect(self._emit_render)
 
     @staticmethod
     def _pair(a: QWidget, b: QWidget) -> QWidget:
@@ -139,6 +159,9 @@ class DisplayControlPanel(QWidget):
             "black_level": self.black_spin.value(),
             "white_level": self.white_spin.value(),
             "stretch_on_roi": self.roi_stretch_check.isChecked(),
+            "clahe_enable": self.clahe_check.isChecked(),
+            "clahe_clip": self.clahe_clip.value(),
+            "clahe_tiles": self.clahe_tiles.value(),
         }
 
     def set_params(self, params: dict, block: bool = True):
@@ -165,6 +188,9 @@ class DisplayControlPanel(QWidget):
             if "black_level" in params: self.black_spin.setValue(float(params["black_level"]))
             if "white_level" in params: self.white_spin.setValue(float(params["white_level"]))
             if "stretch_on_roi" in params: self.roi_stretch_check.setChecked(bool(params["stretch_on_roi"]))
+            if "clahe_enable" in params: self.clahe_check.setChecked(bool(params["clahe_enable"]))
+            if "clahe_clip" in params: self.clahe_clip.setValue(float(params["clahe_clip"]))
+            if "clahe_tiles" in params: self.clahe_tiles.setValue(int(params["clahe_tiles"]))
         finally:
             if block:
                 for w in self.findChildren(QWidget):

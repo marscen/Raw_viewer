@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QHBoxLayout,
                              QTableWidget, QTableWidgetItem, QTabWidget,
                              QVBoxLayout, QWidget)
 
+from ui.qtutil import mono_font, mono_style
 from ui.plots import HistogramPlot, ProfilePlot, color_for
 
 STAT_COLUMNS = ["channel", "count", "mean", "std", "min", "max", "median",
@@ -72,7 +73,7 @@ class StatsPanel(QWidget):
         page = QWidget(); lay = QVBoxLayout(page); lay.setContentsMargins(4, 4, 4, 4)
         self.stats_info = QLabel("未加载图像")
         self.stats_info.setWordWrap(True)
-        self.stats_info.setStyleSheet("font-family: monospace;")
+        self.stats_info.setStyleSheet(mono_style())
         lay.addWidget(self.stats_info)
 
         self.warn_label = QLabel("")
@@ -113,7 +114,7 @@ class StatsPanel(QWidget):
         page = QWidget(); lay = QVBoxLayout(page); lay.setContentsMargins(4, 4, 4, 4)
         head = QHBoxLayout()
         self.profile_info = QLabel("未计算")
-        self.profile_info.setStyleSheet("font-family: monospace;")
+        self.profile_info.setStyleSheet(mono_style())
         head.addWidget(self.profile_info, 1)
         self.profile_band_check = QCheckBox("±3σ 包络")
         self.profile_band_check.setChecked(True)
@@ -134,7 +135,7 @@ class StatsPanel(QWidget):
         head = QHBoxLayout()
         self.inspector_info = QLabel("在图上单击像素以检查邻域")
         self.inspector_info.setWordWrap(True)
-        self.inspector_info.setStyleSheet("font-family: monospace;")
+        self.inspector_info.setStyleSheet(mono_style())
         head.addWidget(self.inspector_info, 1)
         head.addWidget(QLabel("半径:"))
         self.inspector_radius = QSpinBox(); self.inspector_radius.setRange(1, 8)
@@ -142,11 +143,11 @@ class StatsPanel(QWidget):
         head.addWidget(self.inspector_radius)
         lay.addLayout(head)
         self.inspector_table = _make_table(["邻域值"])
-        self.inspector_table.setFont(QFont("Monospace", 11))
+        self.inspector_table.setFont(mono_font(11))
         lay.addWidget(self.inspector_table, 1)
         self.inspector_note = QLabel("")
         self.inspector_note.setWordWrap(True)
-        self.inspector_note.setStyleSheet("color: #9ad; font-family: monospace;")
+        self.inspector_note.setStyleSheet(mono_style("color: #9ad;"))
         lay.addWidget(self.inspector_note)
         self.tabs.addTab(page, "像素检查 Inspector")
 
@@ -154,7 +155,7 @@ class StatsPanel(QWidget):
         page = QWidget(); lay = QVBoxLayout(page); lay.setContentsMargins(4, 4, 4, 4)
         self.defect_info = QLabel("尚无缺陷结果（在算法页运行坏点/坏线检测）")
         self.defect_info.setWordWrap(True)
-        self.defect_info.setStyleSheet("font-family: monospace;")
+        self.defect_info.setStyleSheet(mono_style())
         lay.addWidget(self.defect_info)
 
         self.defect_table = _make_table(DEFECT_COLUMNS)
@@ -208,8 +209,13 @@ class StatsPanel(QWidget):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                 self.stats_table.setItem(r, c, item)
 
-        # 饱和/黑点告警
+        # 数据超出位深（位深设小了 / 16bit 容器左对齐忘了 data_shift）：
+        # 这时显示会被 LUT 截白、直方图也怪，必须先提示去查设置
         msgs = []
+        overall_max = float(overall.get("max") or 0.0)
+        if overall_max > max_code:
+            msgs.append(f"⚠ 数据最大值 {overall_max:.0f} 超过 {bit_depth}bit 上限 "
+                        f"({max_code})：请检查位深 / 左对齐位移(data_shift)设置")
         sat_total = sum(int(st.get("sat") or 0) for st in rows)
         zero_total = sum(int(st.get("zero") or 0) for st in rows)
         total = max(1, sum(int(st.get("count") or 0) for st in rows))
@@ -252,9 +258,10 @@ class StatsPanel(QWidget):
         self._apply_profiles()
 
     def set_inspector(self, nb: dict):
-        if not nb:
+        if not nb or "values" not in nb or getattr(nb["values"], "size", 0) == 0:
             self.inspector_table.setRowCount(0)
             self.inspector_info.setText("在图上单击像素以检查邻域")
+            self.inspector_note.setText("")
             return
         vals = nb["values"]
         chans = nb["channels"]
@@ -263,7 +270,7 @@ class StatsPanel(QWidget):
         self.inspector_table.setColumnCount(w)
         self.inspector_table.setHorizontalHeaderLabels([str(nb["x0"] + i) for i in range(w)])
         self.inspector_table.setVerticalHeaderLabels([str(nb["y0"] + i) for i in range(h)])
-        max_code = max(1, int(vals.max()))
+        max_code = max(1, int(np.max(vals)))
         for r in range(h):
             for c in range(w):
                 ch = str(chans[r, c])

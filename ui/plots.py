@@ -14,6 +14,8 @@ from PyQt6.QtCore import Qt, QPointF, QRectF, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QBrush, QPolygonF
 from PyQt6.QtWidgets import QWidget
 
+from ui.qtutil import mono_font, safe_paint
+
 # 通道统一配色：R/Gr/Gb/B 与画布上的像素文字颜色保持一致
 CHANNEL_COLORS = {
     "ALL": QColor(200, 200, 200),
@@ -72,9 +74,7 @@ class PlotBase(QWidget):
         pen_grid = QPen(QColor(70, 74, 80))
         pen_grid.setWidthF(1.0)
         pen_axis = QPen(QColor(150, 155, 160))
-        font = QFont("Monospace")
-        font.setPixelSize(10)
-        painter.setFont(font)
+        painter.setFont(mono_font(10))
 
         x0, x1 = self._x_range
         y0, y1 = self._y_range
@@ -177,6 +177,7 @@ class HistogramPlot(PlotBase):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawPolygon(poly)
 
+    @safe_paint
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -204,7 +205,7 @@ class HistogramPlot(PlotBase):
 
         if self.cursor_text:
             painter.setPen(QColor(230, 230, 230))
-            painter.setFont(QFont("Monospace", 9))
+            painter.setFont(mono_font(9))
             painter.drawText(QRectF(self.plot_rect().left() + 6, self.plot_rect().top() + 4,
                                     240, 14), Qt.AlignmentFlag.AlignLeft, self.cursor_text)
 
@@ -264,6 +265,7 @@ class ProfilePlot(PlotBase):
         self._x_range = (float(self.index[0]), float(self.index[-1]) or 1.0)
         self._y_range = (lo - pad, hi + pad)
 
+    @safe_paint
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -307,7 +309,7 @@ class ProfilePlot(PlotBase):
             painter.setPen(QPen(QColor(255, 255, 255, 160), 1.0, Qt.PenStyle.DashLine))
             painter.drawLine(QPointF(p.x(), self.plot_rect().top()), QPointF(p.x(), self.plot_rect().bottom()))
             painter.setPen(QColor(240, 240, 240))
-            painter.setFont(QFont("Monospace", 9))
+            painter.setFont(mono_font(9))
             painter.drawText(QRectF(self.plot_rect().left() + 6, self.plot_rect().top() + 4, 320, 14),
                              Qt.AlignmentFlag.AlignLeft, self.cursor_text)
 

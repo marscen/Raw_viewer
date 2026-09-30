@@ -38,9 +38,17 @@ SCENES = ("dark", "shading", "saturated", "bayer", "flat")
 
 
 def _plane_fill(pattern, values: dict, shape):
-    """按相位把 values 填进 (H, W) 数组。values: {phase_name: DN}。"""
+    """按相位把 values 填进 (H, W) 数组。values: {phase_name: DN}。
+
+    Mono 时没有相位可填，用各相位值的平均作为整幅常数（否则 Bayer 场景
+    指定 --pattern Mono/None 会直接 KeyError）。
+    """
+    p = cfa.normalize_pattern(pattern)
+    if p == "Mono/None":
+        return np.full(shape, float(np.mean(list(values.values()))) if values else 0.0,
+                       dtype=np.float32)
     out = np.zeros(shape, dtype=np.float32)
-    names = cfa.PHASE_LABELS[cfa.normalize_pattern(pattern)]
+    names = cfa.PHASE_LABELS[p]
     for phase, (dy, dx) in enumerate(((0, 0), (0, 1), (1, 0), (1, 1))):
         out[dy::2, dx::2] = values.get(names[phase], 0)
     return out
