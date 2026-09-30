@@ -1,0 +1,10 @@
+# 可选加速依赖（不装也能用，只是慢一些）
+#
+# 必须用 headless 版本：opencv-python 自带一套 Qt，会和 PyQt6 抢 Qt 平台插件，
+# 典型症状是启动直接崩在 "could not load the xcb platform plugin"。
+#
+#     pip install -r requirements-optional.txt
+#
+# 装了以后自动启用，可在「显示」面板底部 / Help → Shortcuts 里看到当前后端。
+# 用环境变量 RAWV2_NO_CV2=1 可以强制禁用（用于对比两条代码路径）。
+opencv-python-headless>=4.8
