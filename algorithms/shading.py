@@ -91,6 +91,7 @@ class ShadingAnalysisAlgorithm(Algorithm):
             stats, ys, xs = self._block_stats(plane, blocks, metric)
             if stats is None:
                 continue
+            base_x, base_y, step = view["base_x"], view["base_y"], view["step"]
             global_mean = float(np.mean(plane))
             bmean = float(np.mean(stats))
             bmin, bmax = float(np.min(stats)), float(np.max(stats))
@@ -118,8 +119,12 @@ class ShadingAnalysisAlgorithm(Algorithm):
                         continue
                     key = (i, j)
                     entry = flagged.get(key)
-                    rect = (int(origin[0] + xs[j]), int(origin[1] + ys[i]),
-                            int(xs[j + 1] - xs[j]), int(ys[i + 1] - ys[i]))
+                    # 注意：xs/ys 是**相位子平面**的块边界，转全局必须乘 step
+                    # （x = base_x + step*px）。漏乘会让 Bayer 下的方框只覆盖
+                    # 画面左上 1/4，缺陷清单坐标也只有真值的一半。
+                    rect = (int(base_x + step * xs[j]), int(base_y + step * ys[i]),
+                            int(step * (xs[j + 1] - xs[j])),
+                            int(step * (ys[i + 1] - ys[i])))
                     if entry is None:
                         flagged[key] = {"rect": rect, "best": abs(dev_pct),
                                         "phases": [view["name"]],

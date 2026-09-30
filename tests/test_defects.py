@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 
 import numpy as np
 
@@ -157,8 +158,118 @@ def test_bad_pixel_large_cluster_decomposition():
     check(all(d["type"] == "cluster" for d in res2["defects"]), "小簇标为 cluster")
 
 
+def test_bad_pixel_report_filters():
+    """只报簇 / 剔除孤立单点：过滤报告但不破坏坏线与校正完整性。"""
+    algo = BadPixelDetectionAlgorithm()
+    img = np.full((300, 400), 200, np.uint16)
+    img[:, 150] = 900                       # 坏列（细长结构）
+    img[0, ::40] = 900                      # 孤立点
+    base = defaults(algo, **_ctx(pattern="Mono/None", threshold=200,
+                                 method="Absolute threshold"))
+    r_all = algo.run(img, base)
+    kinds_all = {}
+    for d in r_all["defects"]:
+        kinds_all[d["type"]] = kinds_all.get(d["type"], 0) + 1
+    check(kinds_all.get("col") == 1, f"坏列只报 1 条（实际 {kinds_all}）")
+    check(kinds_all.get("hot", 0) >= 8, "孤立点亮像素被逐个报出")
+
+    r_cluster = algo.run(img, dict(base, report_min_cluster=2))
+    check(all(d["type"] != "hot" for d in r_cluster["defects"]),
+          "只报簇时孤立点不进清单")
+    check(any(d["type"] == "col" for d in r_cluster["defects"]), "坏列仍然报出")
+
+    r_rm = algo.run(img, dict(base, remove_isolated=True))
+    check(r_rm["report"]["cleanup_removed"] >= 8,
+          f"剔除孤立单点应删掉那些像素（{r_rm['report']['cleanup_removed']}）")
+    check(any(d["type"] == "col" for d in r_rm["defects"]), "剔除孤立点不会删掉坏列")
+
+    # 剔除孤立点必须影响校正（噪声不该被"修"）
+    noisy = np.random.default_rng(2).integers(60, 70, (200, 200)).astype(np.uint16)
+    noisy[::20, ::20] = 900                 # 一堆孤立噪点
+    noisy[:, 100] = 900                     # 一条坏列
+    p2 = defaults(algo, **_ctx(pattern="Mono/None", threshold=200,
+                               method="Absolute threshold", visualize_only=False))
+    a = algo.run(noisy, dict(p2, remove_isolated=True))
+    b = algo.run(noisy, dict(p2, remove_isolated=False))
+    check(int((a["image"] != noisy).sum()) < int((b["image"] != noisy).sum()),
+          "剔除孤立点后校正的像素更少（噪声不再被改）")
+    check(int((a["image"][:, 100] != noisy[:, 100]).sum()) > 0, "坏列仍然被校正")
+
+
+def test_clip_regions_and_points():
+    algo = ClipCheckAlgorithm()
+    img = np.full((400, 600), 200, np.uint16)
+    img[50:150, 100:300] = 4095             # 100x200 过曝区域
+    img[300:320, 400:410] = 4095            # 10x20 过曝区域
+    res = algo.run(img, defaults(algo, **_ctx(pattern="Mono/None", _bit_depth=12)))
+    notes = [d["note"] for d in res["defects"]]
+    check(any("x20000" in n and "bbox(100,50)-(299,149)" in n for n in notes),
+          f"大区域 bbox 正确: {notes}")
+    check(any("x200" in n for n in notes), "小区域也被独立报出")
+    rects = [o for o in res["overlays"] if o["type"] == "rect"]
+    check(len(rects) == 2, f"两个区域两个方框（实际 {len(rects)}）")
+    check(res["report"]["sat_total"] == 20200, "饱和总数")
+    # 像素数超过 point_limit(2000) 时刻意不再逐点标注（会拖慢渲染）
+    px = [o for o in res["overlays"] if o["type"] == "point"]
+    check(len(px) == 0, f"超过点数上限时不逐点标出（实际 {len(px)}）")
+
+    tiny = np.full((64, 64), 200, np.uint16)
+    tiny[10:15, 10:15] = 4095               # 25 个饱和像素
+    res2 = algo.run(tiny, defaults(algo, **_ctx(pattern="Mono/None", _bit_depth=12)))
+    px2 = [o for o in res2["overlays"] if o["type"] == "point"]
+    check(len(px2) == 25, f"像素少时逐点标出（实际 {len(px2)}）")
+    check(any("saturated pixel" in (d["note"] or "") for d in res2["defects"]),
+          "少量饱和像素进缺陷清单")
+
+
+def test_bad_line_segment_merge():
+    """分段命中要合并：一条坏线不能报出上百条搭接的段。"""
+    algo = BadLineDetectionAlgorithm()
+    big = np.random.default_rng(0).integers(1800, 2200, (1200, 1600)).astype(np.uint16)
+    big[600, :] = 4000
+    big[:, 800] = 4000
+    res = algo.run(big, defaults(algo, **_ctx(pattern="RGGB", _bit_depth=12,
+                                              axis="Both", threshold=300,
+                                              block_size=64, min_segment=32)))
+    check(res["report"]["raw_hits"] > len(res["defects"]),
+          f"原始命中 {res['report']['raw_hits']} 应被合并为 {len(res['defects'])} 条")
+    check(len(res["defects"]) <= 6, f"合并后条目很少（{len(res['defects'])}）")
+    kinds = {(d["type"], d["y"] if d["type"] == "row" else d["x"]) for d in res["defects"]}
+    check(("row", 600) in kinds and ("col", 800) in kinds, f"两条坏线都在: {kinds}")
+
+
+def test_bad_pixel_large_blob_is_fast():
+    """大块缺陷靠"按簇向量化归约"，不能因为逐像素建列表变成几十秒。"""
+    algo = BadPixelDetectionAlgorithm()
+    big = np.zeros((3000, 4000), np.uint16)
+    big[:] = 2000
+    big[100:1100, 500:2500] = 4095               # 100 万像素的高亮块（边缘一圈会触发）
+    p = defaults(algo, **_ctx(_bit_depth=12, threshold=500, method="Absolute threshold"))
+    t = time.perf_counter()
+    res = algo.run(big, p)
+    dt = time.perf_counter() - t
+    check(dt < 5.0, f"4000x3000 含百万像素缺陷块耗时 {dt * 1000:.0f} ms（应 < 5 s）")
+    check(len(res["defects"]) < 200,
+          f"大块被聚合成少量条目（实际 {len(res['defects'])} 条）")
+    check(len(res["overlays"]) == len(res["defects"]),
+          f"叠加层与清单条数一致（{len(res['overlays'])} vs {len(res['defects'])}）")
+
+
 def test_shading_analysis():
     algo = ShadingAnalysisAlgorithm()
+    # 坐标必须乘 step：Bayer 下的方框要覆盖整幅，而不是只占左上 1/4
+    half = np.zeros((256, 256), np.uint16)
+    half[:] = 400
+    half[:, 128:] = 800
+    for pat in ("Mono/None", "RGGB"):
+        res = algo.run(half, defaults(algo, **_ctx(pattern=pat, blocks=4,
+                                                   metric="mean", warn_pct=5.0)))
+        rects = [o["coords"] for o in res["overlays"]]
+        max_x = max((r[0] + r[2]) for r in rects) if rects else 0
+        check(max_x >= 256, f"{pat}: 分块覆盖整幅宽度（最大右边界 {max_x}）")
+        if res["defects"]:
+            check(max(d["x"] for d in res["defects"]) >= 128,
+                  f"{pat}: 缺陷坐标在右半幅也有（{max(d['x'] for d in res['defects'])}）")
     h, w = 128, 128
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
     r = np.sqrt(((xx - w / 2) / (w / 2)) ** 2 + ((yy - h / 2) / (h / 2)) ** 2)

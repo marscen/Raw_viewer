@@ -14,6 +14,7 @@ from __future__ import annotations
 import numpy as np
 
 from algorithms import _common as C
+from utils import accel
 from .base import Algorithm
 
 
@@ -62,19 +63,26 @@ class BadLineDetectionAlgorithm(Algorithm):
 
     # ------------------------------------------------------------------
     @staticmethod
-    def _detect_axis(profile: np.ndarray, floor: float, k: float,
-                     method: str, window: int):
-        """对一维 profile 做局部中值比对，返回 (偏差数组, 门限)。"""
-        n = profile.size
-        w = max(3, int(window) | 1)
+    def _moving_reference(profile: np.ndarray, window: int) -> np.ndarray:
+        """去掉中心点的滑动邻域中值（全向量化）。
+
+        旧实现按位置写 Python 循环 + 每次 np.median，分段检测时是 2500 ms 级
+        的开销；改成把 (w-1) 个移位切片一次性堆起来取中值，同样的活只要几十毫秒。
+        """
+        n = int(profile.size)
+        w = max(3, int(window) | 1)          # 强制奇数
         half = w // 2
-        padded = np.pad(profile, (half, half), mode="edge")
-        # 每个位置的局部参考：去掉中心点的邻域中值
-        ref = np.empty(n, dtype=np.float32)
-        for i in range(n):
-            seg = np.concatenate([padded[i:i + half], padded[i + half + 1:i + w]])
-            ref[i] = np.median(seg) if seg.size else padded[i + half]
-        dev = profile - ref
+        padded = np.pad(profile.astype(np.float32), (half, half), mode="edge")
+        offsets = [d for d in range(-half, half + 1) if d != 0]
+        stack = np.stack([padded[half + d: half + d + n] for d in offsets])
+        return np.median(stack, axis=0)
+
+    @classmethod
+    def _detect_axis(cls, profile: np.ndarray, floor: float, k: float,
+                     method: str, window: int):
+        """对一维 profile 做局部中值比对，返回 (偏差数组, 门限, sigma)。"""
+        ref = cls._moving_reference(profile, window)
+        dev = profile.astype(np.float32) - ref
         if method.startswith("Adaptive"):
             sigma = C.robust_sigma(dev)
             thr = max(k * sigma, floor)
@@ -96,8 +104,22 @@ class BadLineDetectionAlgorithm(Algorithm):
         use_cols = axis in ("Cols", "Both")
 
         work, origin = C.crop_with_origin(image_data, params.get("_roi"))
-        h, w = work.shape
-        defects = []
+        H, W = work.shape
+        hits = []          # 原始命中：{type, index, a0, a1, delta, value, channel}
+
+        def scan(profile, kind, along0, along1, line_index, channel):
+            """在一维 profile 上找坏线/坏段，along0/along1 是该段的区间（沿剖面方向）。"""
+            dev, thr, _sigma = self._detect_axis(profile, floor, k, method, window)
+            for i in np.nonzero(np.abs(dev) > thr)[0]:
+                i = int(i)
+                hits.append({
+                    "type": kind,
+                    "index": int(line_index(i)),
+                    "a0": int(along0), "a1": int(along1),
+                    "delta": float(dev[i]),
+                    "value": float(profile[i]),
+                    "channel": channel,
+                })
 
         for view in C.plane_views(work, pattern, origin):
             plane = view["plane"]
@@ -109,100 +131,103 @@ class BadLineDetectionAlgorithm(Algorithm):
 
             if use_rows:
                 if block <= 0:
-                    prof = pf.mean(axis=1)
-                    dev, thr, sigma = self._detect_axis(prof, floor, k, method, window)
-                    for i in np.nonzero(np.abs(dev) > thr)[0]:
-                        gy = base_y + step * int(i)
-                        defects.append({
-                            "type": "row", "x": 0, "y": int(gy),
-                            "channel": view["name"],
-                            "value": round(float(prof[i]), 1),
-                            "delta": round(float(dev[i]), 2),
-                            "note": "full row",
-                            "coords": (0, int(gy), image_data.shape[1], int(gy)),
-                        })
+                    scan(pf.mean(axis=1), "row", 0, W - 1,
+                         lambda i, b=base_y, st=step: b + st * i, view["name"])
                 else:
                     for b0 in range(0, pw, block):
                         b1 = min(pw, b0 + block)
                         if (b1 - b0) < min_seg:
                             continue
-                        prof = pf[:, b0:b1].mean(axis=1)
-                        dev, thr, sigma = self._detect_axis(prof, floor, k, method, window)
-                        for i in np.nonzero(np.abs(dev) > thr)[0]:
-                            gy = base_y + step * int(i)
-                            gx0 = base_x + step * b0
-                            gx1 = base_x + step * (b1 - 1)
-                            defects.append({
-                                "type": "row", "x": int(gx0), "y": int(gy),
-                                "channel": view["name"],
-                                "value": round(float(prof[i]), 1),
-                                "delta": round(float(dev[i]), 2),
-                                "note": f"seg x{gx0}..{gx1}",
-                                "coords": (int(gx0), int(gy), int(gx1) + 1, int(gy)),
-                            })
-
+                        scan(pf[:, b0:b1].mean(axis=1), "row",
+                             base_x + step * b0, base_x + step * (b1 - 1),
+                             lambda i, b=base_y, st=step: b + st * i, view["name"])
             if use_cols:
                 if block <= 0:
-                    prof = pf.mean(axis=0)
-                    dev, thr, sigma = self._detect_axis(prof, floor, k, method, window)
-                    for i in np.nonzero(np.abs(dev) > thr)[0]:
-                        gx = base_x + step * int(i)
-                        defects.append({
-                            "type": "col", "x": int(gx), "y": 0,
-                            "channel": view["name"],
-                            "value": round(float(prof[i]), 1),
-                            "delta": round(float(dev[i]), 2),
-                            "note": "full col",
-                            "coords": (int(gx), 0, int(gx), image_data.shape[0]),
-                        })
+                    scan(pf.mean(axis=0), "col", 0, H - 1,
+                         lambda i, b=base_x, st=step: b + st * i, view["name"])
                 else:
                     for b0 in range(0, ph, block):
                         b1 = min(ph, b0 + block)
                         if (b1 - b0) < min_seg:
                             continue
-                        prof = pf[b0:b1, :].mean(axis=0)
-                        dev, thr, sigma = self._detect_axis(prof, floor, k, method, window)
-                        for i in np.nonzero(np.abs(dev) > thr)[0]:
-                            gx = base_x + step * int(i)
-                            gy0 = base_y + step * b0
-                            gy1 = base_y + step * (b1 - 1)
-                            defects.append({
-                                "type": "col", "x": int(gx), "y": int(gy0),
-                                "channel": view["name"],
-                                "value": round(float(prof[i]), 1),
-                                "delta": round(float(dev[i]), 2),
-                                "note": f"seg y{gy0}..{gy1}",
-                                "coords": (int(gx), int(gy0), int(gx), int(gy1) + 1),
-                            })
+                        scan(pf[b0:b1, :].mean(axis=0), "col",
+                             base_y + step * b0, base_y + step * (b1 - 1),
+                             lambda i, b=base_x, st=step: b + st * i, view["name"])
 
-        # 合并同一行/列（多相位可能同时命中），保留最强的偏差
-        merged = {}
-        for d in defects:
-            key = (d["type"], d["y"] if d["type"] == "row" else d["x"], d["note"])
-            cur = merged.get(key)
-            if cur is None:
-                d["channels"] = [d["channel"]]
-                merged[key] = d
-                continue
-            if d["channel"] not in cur["channels"]:
-                cur["channels"].append(d["channel"])
-            if abs(d["delta"]) > abs(cur["delta"]):     # 保留偏差最大的相位做代表
-                d["channels"] = cur["channels"]
-                merged[key] = d
+        # ---- 合并同一行/列的搭接分段 ----
+        # 分段模式下，不同相位、相邻分块会给出边界错开的重叠段（例如
+        # "seg y0..126" 和 "seg y1..127"），不合并的话一条坏列能报出上百条。
+        grouped = {}
+        for h_ in hits:
+            grouped.setdefault((h_["type"], h_["index"]), []).append(h_)
 
-        final = sorted(merged.values(), key=lambda d: (d["type"], d["y"], d["x"]))
-        overlays = [{
-            "type": "line",
-            "coords": tuple(d["coords"]),
-            "kind": d["type"],
-            "color": d["type"],
-        } for d in final]
+        merged = []
+        for (dtype, index), items in sorted(grouped.items()):
+            items.sort(key=lambda x: (x["a0"], x["a1"]))
+            cur = None
+            for it in items:
+                if cur is None:
+                    cur = {"a0": it["a0"], "a1": it["a1"], "wsum": it["delta"] * abs(it["delta"]),
+                           "vsum": it["value"] * abs(it["delta"]), "w": abs(it["delta"]),
+                           "best": it, "channels": {it["channel"]}}
+                    continue
+                if it["a0"] <= cur["a1"] + 1:                 # 相邻/重叠 -> 同一段
+                    cur["a1"] = max(cur["a1"], it["a1"])
+                    wgt = abs(it["delta"])
+                    cur["wsum"] += it["delta"] * wgt
+                    cur["vsum"] += it["value"] * wgt
+                    cur["w"] += wgt
+                    cur["channels"].add(it["channel"])
+                    if abs(it["delta"]) > abs(cur["best"]["delta"]):
+                        cur["best"] = it
+                else:
+                    merged.append(cur)
+                    cur = {"a0": it["a0"], "a1": it["a1"], "wsum": it["delta"] * abs(it["delta"]),
+                           "vsum": it["value"] * abs(it["delta"]), "w": abs(it["delta"]),
+                           "best": it, "channels": {it["channel"]}}
+            if cur is not None:
+                merged.append(cur)
 
-        rows = sum(1 for d in final if d["type"] == "row")
-        cols = sum(1 for d in final if d["type"] == "col")
-        message = f"坏线 {len(final)} 条（行 {rows} / 列 {cols}）"
-        if final:
-            worst = max(final, key=lambda d: abs(d["delta"]))
+        full_extent = W - 1 if use_cols else H - 1
+        defects, overlays = [], []
+        for m in merged:
+            dtype = m["best"]["type"]
+            index = m["best"]["index"]
+            weight = max(m["w"], 1e-9)
+            delta = m["wsum"] / weight
+            value = m["vsum"] / weight
+            total_extent = (W - 1) if dtype == "row" else (H - 1)
+            if m["a0"] <= 0.02 * total_extent and m["a1"] >= 0.98 * total_extent:
+                note = f"full {dtype}"
+            elif dtype == "row":
+                note = f"seg x{m['a0']}..{m['a1']}"
+            else:
+                note = f"seg y{m['a0']}..{m['a1']}"
+            channels = "/".join(sorted(m["channels"]))
+            if len(m["channels"]) > 1:
+                note += f" ({channels})"
+            if dtype == "row":
+                defects.append({"type": "row", "x": 0, "y": int(index),
+                                "channel": m["best"]["channel"],
+                                "value": round(value, 1), "delta": round(delta, 2),
+                                "note": note})
+                overlays.append({"type": "line", "kind": "row", "color": "row",
+                                 "coords": (int(m["a0"]), int(index),
+                                            int(m["a1"]) + 1, int(index))})
+            else:
+                defects.append({"type": "col", "x": int(index), "y": 0,
+                                "channel": m["best"]["channel"],
+                                "value": round(value, 1), "delta": round(delta, 2),
+                                "note": note})
+                overlays.append({"type": "line", "kind": "col", "color": "col",
+                                 "coords": (int(index), int(m["a0"]),
+                                            int(index), int(m["a1"]) + 1)})
+
+        rows = sum(1 for d in defects if d["type"] == "row")
+        cols = sum(1 for d in defects if d["type"] == "col")
+        message = f"坏线 {len(defects)} 条（行 {rows} / 列 {cols}）"
+        if defects:
+            worst = max(defects, key=lambda d: abs(d["delta"]))
             message += (f"\n最大偏差: {worst['type']} "
                         f"{'y' if worst['type'] == 'row' else 'x'}="
                         f"{worst['y'] if worst['type'] == 'row' else worst['x']} "
@@ -210,7 +235,8 @@ class BadLineDetectionAlgorithm(Algorithm):
         return {
             "image": image_data,
             "overlays": overlays,
-            "defects": final,
+            "defects": defects,
             "message": message,
-            "report": {"rows": rows, "cols": cols},
+            "report": {"rows": rows, "cols": cols, "raw_hits": len(hits),
+                       "backend": accel.backend_name()},
         }

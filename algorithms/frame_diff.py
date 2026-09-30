@@ -57,13 +57,15 @@ class FrameDiffAlgorithm(Algorithm):
                     "message": "需要一个同尺寸的参考帧：File → Open Reference Image…",
                     "report": {}}
 
-        res = S.diff_stats(image_data, reference, bit_depth, max_code, tol=tol)
+        work, origin = C.crop_with_origin(image_data, params.get("_roi"))
+        ref_work, _ = C.crop_with_origin(reference, params.get("_roi"))
+        # 指标必须在**同一区域**上算：勾了"只在 ROI 内运行"却给整幅的 PSNR，
+        # 会出现"清单里 0 个差异像素、消息里却写差异 12.5%"的自相矛盾
+        res = S.diff_stats(work, ref_work, bit_depth, max_code, tol=tol)
         if "error" in res:
             return {"image": image_data, "overlays": [], "defects": [],
                     "message": res["error"], "report": res}
 
-        work, origin = C.crop_with_origin(image_data, params.get("_roi"))
-        ref_work, _ = C.crop_with_origin(reference, params.get("_roi"))
         diff = np.abs(work.astype(np.int32) - ref_work.astype(np.int32))
 
         overlays, defects = [], []
@@ -87,8 +89,9 @@ class FrameDiffAlgorithm(Algorithm):
                              "color": "hot" if signed > 0 else "dead", "radius": 3})
 
         psnr = res["psnr"]
+        scope = "ROI" if params.get("_roi") else "全图"
         message = (
-            f"PSNR {psnr:.2f} dB   RMSE {res['rmse']:.3f} DN\n"
+            f"[{scope}] PSNR {psnr:.2f} dB   RMSE {res['rmse']:.3f} DN\n"
             f"平均|Δ| {res['mean_abs']:.3f}   最大|Δ| {res['max_abs']:.0f}   "
             f"差异像素(> {tol} DN) {res['count_diff']} ({res['pct_diff']:.4f}%)\n"
             f"|Δ| > {hot_threshold:.0f} DN 的像素 {int(mask.sum())} 个（已列入缺陷清单）")

@@ -13,7 +13,7 @@ from __future__ import annotations
 import numpy as np
 
 from algorithms import _common as C
-from utils import cfa
+from utils import accel, cfa
 from .base import Algorithm
 
 
@@ -46,6 +46,9 @@ class ClipCheckAlgorithm(Algorithm):
                        "label": "分块数 (每轴)"},
             "point_limit": {"type": "int", "default": 2000, "min": 0, "max": 100000,
                             "label": "精确定位点数上限"},
+            "region_limit": {"type": "int", "default": 50000, "min": 100, "max": 5000000,
+                             "label": "区域分析像素上限",
+                             "tooltip": "饱和像素超过该数量时退化为块状统计，避免百万级像素逐点分析"},
         }
 
     def run(self, image_data: np.ndarray, params: dict):
@@ -79,34 +82,65 @@ class ClipCheckAlgorithm(Algorithm):
                 f"{view['name']}: 饱和 {sat} ({100.0 * sat / n:.4f}%)  "
                 f"0DN {zero} ({100.0 * zero / n:.4f}%)")
 
-        # ---- 块状分布 ----
-        ys = np.linspace(0, h, blocks + 1).astype(int)
-        xs = np.linspace(0, w, blocks + 1).astype(int)
-        sat_sum = np.add.reduceat(np.add.reduceat(sat_mask.astype(np.int64), ys[:-1], axis=0),
-                                  xs[:-1], axis=1)
-        counts = np.outer(np.diff(ys), np.diff(xs))
-        pct = 100.0 * sat_sum / np.maximum(counts, 1)
+        # ---- 过曝区域：能算连通区域就算区域（有 bbox/面积/峰值），
+        #      像素太多时才退化成块状统计（避免百万级像素的逐点开销）----
+        sat_total = int(np.count_nonzero(sat_mask))
+        region_limit = int(params.get("region_limit", 50000) or 50000)
         hot_blocks = 0
-        for i in range(blocks):
-            for j in range(blocks):
-                if pct[i, j] <= warn_pct:
-                    continue
-                hot_blocks += 1
-                rect = (int(origin[0] + xs[j]), int(origin[1] + ys[i]),
-                        int(xs[j + 1] - xs[j]), int(ys[i + 1] - ys[i]))
-                overlays.append({"type": "rect", "coords": rect,
-                                 "kind": "sat", "color": "sat"})
+        if sat_total and sat_total <= region_limit:
+            labels, sizes = accel.connected_components(sat_mask, 8)
+            n_regions = int(labels.max())
+            rows_map = {}
+            ys_r, xs_r = np.nonzero(sat_mask)
+            for py, px, lb in zip(ys_r.tolist(), xs_r.tolist(), labels[sat_mask].tolist()):
+                e = rows_map.get(lb)
+                if e is None:
+                    rows_map[lb] = [py, py, px, px, 1, int(work[py, px])]
+                else:
+                    e[0] = min(e[0], py); e[1] = max(e[1], py)
+                    e[2] = min(e[2], px); e[3] = max(e[3], px)
+                    e[4] += 1
+                    e[5] = max(e[5], int(work[py, px]))
+            for lb, (ry0, ry1, rx0, rx1, area, peak) in sorted(rows_map.items()):
+                gx0, gy0 = int(origin[0] + rx0), int(origin[1] + ry0)
+                gx1, gy1 = int(origin[0] + rx1), int(origin[1] + ry1)
+                overlays.append({"type": "rect", "kind": "sat", "color": "sat",
+                                 "coords": (gx0, gy0, gx1 - gx0 + 1, gy1 - gy0 + 1)})
                 defects.append({
-                    "type": "sat", "x": int(rect[0] + rect[2] // 2),
-                    "y": int(rect[1] + rect[3] // 2), "channel": "-",
-                    "value": round(float(pct[i, j]), 2),
-                    "delta": round(float(pct[i, j]), 2),
-                    "note": f"饱和块 {pct[i, j]:.2f}%",
+                    "type": "sat", "x": int((gx0 + gx1) // 2), "y": int((gy0 + gy1) // 2),
+                    "channel": cfa.plane_name_at((gx0 + gx1) // 2, (gy0 + gy1) // 2, pattern),
+                    "value": peak, "delta": peak - sat_level,
+                    "note": f"过热区域 x{area} bbox({gx0},{gy0})-({gx1},{gy1})",
                 })
-        msg_lines.append(f"饱和块 {hot_blocks} 个（> {warn_pct:.3f}%），已用方框标出")
+            hot_blocks = n_regions
+            msg_lines.append(f"过曝区域 {n_regions} 个（已用方框标出 bbox）")
+        else:
+            blocks = max(2, int(params.get("blocks", 24) or 24))
+            ys = np.linspace(0, h, blocks + 1).astype(int)
+            xs = np.linspace(0, w, blocks + 1).astype(int)
+            sat_sum = np.add.reduceat(
+                np.add.reduceat(sat_mask.astype(np.int64), ys[:-1], axis=0), xs[:-1], axis=1)
+            counts = np.outer(np.diff(ys), np.diff(xs))
+            pct = 100.0 * sat_sum / np.maximum(counts, 1)
+            for i in range(blocks):
+                for j in range(blocks):
+                    if pct[i, j] <= warn_pct:
+                        continue
+                    hot_blocks += 1
+                    rect = (int(origin[0] + xs[j]), int(origin[1] + ys[i]),
+                            int(xs[j + 1] - xs[j]), int(ys[i + 1] - ys[i]))
+                    overlays.append({"type": "rect", "coords": rect,
+                                     "kind": "sat", "color": "sat"})
+                    defects.append({
+                        "type": "sat", "x": int(rect[0] + rect[2] // 2),
+                        "y": int(rect[1] + rect[3] // 2), "channel": "-",
+                        "value": round(float(pct[i, j]), 2),
+                        "delta": round(float(pct[i, j]), 2),
+                        "note": f"饱和块 {pct[i, j]:.2f}%（像素过多，按块统计）",
+                    })
+            msg_lines.append(f"饱和块 {hot_blocks} 个（> {warn_pct:.3f}%，像素过多按块统计）")
 
         # ---- 精确点位（数量不多时）----
-        sat_total = int(np.count_nonzero(sat_mask))
         if point_limit and 0 < sat_total <= point_limit:
             ys_i, xs_i = np.nonzero(sat_mask)
             for py, px in zip(ys_i.tolist(), xs_i.tolist()):
