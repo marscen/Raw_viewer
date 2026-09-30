@@ -19,7 +19,7 @@ from dataclasses import dataclass, asdict
 
 import numpy as np
 
-from utils import cfa
+from utils import accel, cfa
 
 __all__ = [
     "VIEW_MODES", "STRETCH_MODES", "COLORMAPS",
@@ -74,6 +74,10 @@ class DisplayParams:
     invert: bool = False
     colormap: str = "Gray"
     stretch_on_roi: bool = False      # 电平按 ROI 计算（ROI 内有强反光时有用）
+    # 局部对比度增强（CLAHE）：暗场/低对比画面里看结构用
+    clahe_enable: bool = False
+    clahe_clip: float = 2.0
+    clahe_tiles: int = 8
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -102,12 +106,11 @@ class RenderInfo:
 # 电平
 # ----------------------------------------------------------------------
 def _percentile_levels(vals: np.ndarray, p_low: float, p_high: float):
-    vals = np.ravel(vals)
+    # 大图抽样：**必须用奇步长**，否则 Bayer 图的 4 个相位只有 2 个被统计到
+    # （详见 cfa.stratified_sample 的注释）
+    vals = cfa.stratified_sample(vals, limit=4_000_000)
     if vals.size == 0:
         return 0.0, 1.0
-    if vals.size > 4_000_000:                      # 大图抽样，保证交互流畅
-        step = max(1, vals.size // 1_000_000)
-        vals = vals[::step]
     lo, hi = np.percentile(vals, [p_low, p_high])
     return float(lo), float(hi)
 
@@ -340,10 +343,18 @@ def render_display(raw: np.ndarray, params: DisplayParams, roi=None):
     if is_plane:
         codes, mask, view_name = _plane_selection(raw, params, view)
 
-    # 电平统计用的样本
+    # 电平统计用的样本：单通道视图只用本相位的点；勾了"按 ROI 计算"再与
+    # ROI 取交集（旧实现是 if/elif，plane 视图下 ROI 选项被静默忽略）
     sample_src = codes
     if mask is not None:
         sample_src = codes[mask]
+        if params.stretch_on_roi and roi is not None:
+            x0, y0, x1, y1 = (int(v) for v in roi)
+            sel = np.zeros_like(mask, dtype=bool)
+            sel[max(0, y0):max(0, y1), max(0, x0):max(0, x1)] = True
+            sel &= mask
+            if sel.any():
+                sample_src = codes[sel]
     elif params.stretch_on_roi and roi is not None:
         x0, y0, x1, y1 = (int(v) for v in roi)
         x0, y0 = max(0, x0), max(0, y0)
@@ -357,24 +368,38 @@ def render_display(raw: np.ndarray, params: DisplayParams, roi=None):
     # 彩色路径与灰度路径分开处理
     if view == "Bayer Mosaic":
         gray = gray_from_codes(codes, lut)
+        if params.clahe_enable:
+            gray = accel.clahe(gray, params.clahe_clip, params.clahe_tiles)
         if mask is not None:                      # 理论上不会走到
             gray = np.where(mask, gray, 0).astype(np.uint8)
         return bayer_colorize(gray, params.pattern), RenderInfo(
             lo=lo, hi=hi, view=view_name, is_color=True)
 
     if view == "Bayer Demosaic":
-        norm = (codes.astype(np.float32) - lo) / max(hi - lo, 1e-6)
-        np.clip(norm, 0.0, 1.0, out=norm)
-        gamma = float(params.gamma) if params.gamma and params.gamma > 0 else 1.0
-        if gamma != 1.0:
-            norm = np.power(norm, 1.0 / gamma)
-        if params.invert:
-            norm = 1.0 - norm
-        rgb = demosaic(norm, params.pattern)
-        rgb8 = np.rint(np.clip(rgb, 0.0, 1.0) * 255.0).astype(np.uint8)
+        # 先在 DN 空间做插值，再过 LUT（电平/gamma/反相都在 LUT 里）。
+        # 这样 gamma≠1 时是"先插值后 gamma"，顺序正确；两条后端路径的
+        # **通道映射完全一致**，但插值核不同（cv2 是边缘自适应、质量更好，
+        # numpy 回退是双线性），所以像素级会有几个 DN 的差异，属预期。
+        if cfa.normalize_pattern(params.pattern) == "Mono/None":
+            rgb_dn = np.repeat(codes[:, :, None], 3, axis=2)
+        else:
+            rgb_dn = accel.demosaic(codes, params.pattern)
+        dem = np.asarray(rgb_dn)
+        rgb8 = np.empty(dem.shape, dtype=np.uint8)
+        # 逐通道查表：避免一次性建 3 通道 uint32 索引（4000x3000 时省 ~100MB 峰值内存）
+        for _c in range(3):
+            ch = dem[:, :, _c]
+            if ch.dtype not in (np.uint8, np.uint16):
+                ch = np.rint(ch)
+            rgb8[:, :, _c] = lut[np.clip(ch, 0, len(lut) - 1).astype(np.uint32, copy=False)]
+        if params.clahe_enable:
+            rgb8 = np.stack([accel.clahe(rgb8[:, :, i], params.clahe_clip,
+                                         params.clahe_tiles) for i in range(3)], axis=2)
         return rgb8, RenderInfo(lo=lo, hi=hi, view=view_name, is_color=True)
 
     gray = gray_from_codes(codes, lut)
+    if params.clahe_enable:
+        gray = accel.clahe(gray, params.clahe_clip, params.clahe_tiles)
     if mask is not None:
         gray = np.where(mask, gray, 0).astype(np.uint8)
 

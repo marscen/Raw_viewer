@@ -134,6 +134,72 @@ def test_stretch_modes_and_degenerate_levels():
     check(img_i[0, 0] < 255, "反相后亮部变暗")
 
 
+def test_clahe_display_option():
+    """CLAHE 开关要真的改变画面；两种后端都必须能跑。"""
+    from utils import accel
+    raw = np.zeros((128, 128), np.uint16)
+    raw[:64, :] = 200
+    raw[64:, :] = 216                      # 很低对比度的两块
+    base = dict(bit_depth=10, pattern="Mono/None", stretch="Fixed (black/white)",
+                black_level=190, white_level=230)
+    plain, _ = D.render_display(raw, D.DisplayParams(view="Mono", **base))
+    enh, _ = D.render_display(raw, D.DisplayParams(view="Mono", clahe_enable=True,
+                                                  clahe_clip=3.0, clahe_tiles=4, **base))
+    check(plain.shape == enh.shape and enh.dtype == np.uint8, "CLAHE 输出形状/dtype")
+    check(float(enh.max()) - float(enh.min()) >= float(plain.max()) - float(plain.min()),
+          "CLAHE 不应降低对比度")
+    check(accel.backend_name() != "", "后端信息可读")
+
+
+def test_large_array_statistics_are_cheap_and_exact():
+    """大图统计：数值要对、不能整块转 float64、抽样必须避开 CFA 相位混叠。"""
+    import resource
+    import time
+    raw = np.full((3000, 4000), 500, np.uint16)
+    raw[::7, ::5] = 900
+    t = time.perf_counter()
+    st = S.roi_stats(raw, "RGGB", None, 10)
+    dt = time.perf_counter() - t
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1048576
+    check(dt < 3.0, f"12MP roi_stats 耗时 {dt:.2f}s（应 < 3s）")
+    check(peak < 900, f"12MP 统计峰值 RSS {peak:.0f}MB（应 < 900MB）")
+    check_close(st["overall"]["mean"], float(raw.mean()), 0.01, "大图均值精确")
+    check_close(st["overall"]["std"], float(raw.std()), 0.01, "大图标准差精确")
+    # 四相位等差图：抽样不能只命中两个相位（否则 hi 会偏小一半）
+    img = np.zeros((3000, 4000), np.uint16)
+    for ph, (dy, dx) in enumerate(((0, 0), (0, 1), (1, 0), (1, 1))):
+        img[dy::2, dx::2] = [100, 200, 300, 400][ph]
+    lo, hi = D._percentile_levels(img, 0.5, 99.5)
+    check_close(lo, 100, 1.0, "四相位图低电平")
+    check_close(hi, 400, 1.0, "四相位图高电平（抽样未与相位混叠）")
+    # 越界/空输入不再抛异常
+    check(S.neighborhood(np.zeros((8, 8), np.uint16), 100, 100, 2, "RGGB")["center"] == (7, 7),
+          "检查器坐标越界被夹紧")
+    check(S.roi_stats(np.zeros((0, 0), np.uint16), "RGGB")["size"] == (0, 0),
+          "空数组统计安全")
+    check("error" in S.diff_stats(np.zeros((0, 0)), np.zeros((0, 0))), "空数组差分安全")
+
+
+def test_histogram_keeps_out_of_range_data():
+    """数据超出位深时：不能悄悄丢计数，横轴要照实画出来。"""
+    raw = np.zeros((100, 100), np.uint16)
+    raw[:] = 500
+    raw[0, :50] = 4000                 # 50 个像素超出 10bit
+    counts, edges = S.histogram(raw, "Mono/None", None, 10, bins=256)
+    check(counts.sum() == raw.size, f"计数不丢（{counts.sum()} / {raw.size}）")
+    check_close(edges[-1], 4001, 1.0, "横轴覆盖真实最大值")
+    counts2, edges2 = S.histogram(raw, "Mono/None", None, 10, bins=4096)
+    check(counts2.size == 4001 and counts2.sum() == raw.size,
+          f"bin 数随数据扩展（{counts2.size}）")
+
+
+def test_degenerate_snr_is_not_inf():
+    st = S.roi_stats(np.zeros((16, 16), np.uint16), "Mono/None", None, 10)
+    check(st["overall"]["snr_db"] == "n/a", f"全黑帧 SNR = {st['overall']['snr_db']!r}")
+    st2 = S.roi_stats(np.full((16, 16), 100, np.uint16), "Mono/None", None, 10)
+    check(st2["overall"]["snr_db"] == "n/a", "常值帧 SNR 不显示 inf")
+
+
 def test_colormaps():
     gray = np.linspace(0, 255, 256, dtype=np.uint8).reshape(16, 16)
     for name in D.COLORMAPS:

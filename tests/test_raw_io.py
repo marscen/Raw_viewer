@@ -129,6 +129,40 @@ def test_size_validation_and_errors():
         check(True, "位深校验")
 
 
+def test_chunked_packed_decode_matches_and_bounds_memory():
+    """分块解码：结果必须与整块一致，且不再按文件体积倍数吃内存。"""
+    rng = np.random.default_rng(7)
+    for depth in (10, 12, 14):
+        rows = 600                                  # > 512 行会走分块路径
+        img = rng.integers(0, 1 << depth, (rows, 64)).astype(np.uint16)
+        path = os.path.join(TMP, f"chunk{depth}.raw")
+        with open(path, "wb") as fh:
+            fh.write(pack_array(img, depth).tobytes())
+        got = load_raw(path, RawLoadSpec(64, rows, depth, packing="packed"))
+        check(np.array_equal(got, img), f"RAW{depth} 600 行分块解码一致")
+    # 分块路径与不分块路径结果一致（同一份数据，行数不同）
+    img = rng.integers(0, 1024, (513, 32)).astype(np.uint16)
+    path = os.path.join(TMP, "chunk_edge.raw")
+    with open(path, "wb") as fh:
+        fh.write(pack_array(img, 10).tobytes())
+    check(np.array_equal(load_raw(path, RawLoadSpec(32, 513, 10, packing="packed")), img),
+          "分块边界（513 行）一致")
+
+
+def test_frame_stride_validation():
+    data = np.arange(16 * 16, dtype=np.uint16).reshape(16, 16)
+    path = os.path.join(TMP, "stride.raw")
+    with open(path, "wb") as fh:
+        fh.write(data.tobytes() * 2)
+    try:
+        load_raw(path, RawLoadSpec(16, 16, 16, frame_stride_bytes=64))
+        check(False, "frame_stride 过小应当报错（否则帧会静默重叠）")
+    except RawReadError as exc:
+        check("重叠" in str(exc), f"frame_stride 校验信息: {exc}")
+    check(np.array_equal(load_raw(path, RawLoadSpec(16, 16, 16, frame_index=1)), data),
+          "正常多帧仍可读")
+
+
 def test_geometry_suggestion():
     cases = [
         (1920 * 1080 * 2, (1920, 1080)),

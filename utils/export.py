@@ -94,17 +94,17 @@ def write_tiff(path: str, image: np.ndarray) -> str:
         h, w, _ = a.shape
         a = np.ascontiguousarray(a[:, :, :3])
         samples, photometric = 3, 2
-        bits = 8
+        bits = 16 if a.dtype == np.uint16 else 8     # 16bit RGB 也照实写，不截断
     else:
         raise ValueError(f"不支持的数组形状：{a.shape}")
 
-    if samples == 1 and bits == 16:
+    if bits == 16:
         data = a.astype("<u2", copy=False).tobytes()
     else:
         data = a.astype(np.uint8, copy=False).tobytes()
 
     SHORT, LONG = 3, 4
-    extra = struct.pack("<3H", 8, 8, 8) if samples == 3 else b""
+    extra = struct.pack("<3H", bits, bits, bits) if samples == 3 else b""
     bits_offset = 8 if samples == 3 else 0
     data_offset = 8 + len(extra)
     ifd_offset = data_offset + len(data)
@@ -206,23 +206,28 @@ _PALETTE = {
 }
 
 
-def to_display_rgb(image: np.ndarray) -> np.ndarray:
-    """任意显示数组 -> (H, W, 3) uint8，便于画标注。"""
+def to_display_rgb(image: np.ndarray, max_code: int = 0) -> np.ndarray:
+    """任意显示数组 -> (H, W, 3) uint8，便于画标注。
+
+    max_code 指定数值上限（例如 10bit 数据给 1023）。不指定时按 dtype 上限
+    缩放 —— 直接把 10bit 数据按 /65535 处理会得到近乎全黑的标注图。
+    """
     a = _as_uint(image)
     if a.ndim == 2:
         if a.dtype == np.uint16:
-            a = (a.astype(np.uint32) * 255 // 65535).astype(np.uint8)
+            hi = int(max_code) if max_code else 65535
+            a = np.clip(a.astype(np.uint32) * 255 // max(1, hi), 0, 255).astype(np.uint8)
         return np.repeat(a[:, :, None], 3, axis=2)
     return np.ascontiguousarray(a[:, :, :3])
 
 
 def draw_defects(image: np.ndarray, defects, radius: int = 3,
-                 line_width: int = 1) -> np.ndarray:
+                 line_width: int = 1, max_code: int = 0) -> np.ndarray:
     """把缺陷位置画到图上的 RGB8 数组里（返回新数组，不改原图）。
 
     point 类型画方框，line 类型画横/竖线。
     """
-    rgb = to_display_rgb(image).copy()
+    rgb = to_display_rgb(image, max_code=max_code).copy()
     h, w = rgb.shape[:2]
 
     def rect(x0, y0, x1, y1, color):

@@ -195,10 +195,36 @@ def unpack_array(buf: np.ndarray, bit_depth: int, width: int) -> np.ndarray:
         raise RawReadError(
             f"packed RAW{bit_depth} 行字节数 {buf.shape[1]} 不是 {group_bytes} 的倍数")
 
+    buf = np.ascontiguousarray(buf, dtype=np.uint8)
     h, rb = buf.shape
     ngroups = rb // group_bytes
-    groups = buf.reshape(h, ngroups, group_bytes)
 
+    # 大文件分块解码：整块做的话，unpackbits 会把低位字节膨胀 8 倍、再加几个
+    # uint16 中间量，57MB 的 RAW10 8000x6000 实测峰值 938MB。按行分块后
+    # 峰值只跟块大小有关（输出数组本身除外）。
+    if h > 512:
+        out = np.empty((h, ngroups * group), dtype=np.uint16)
+        step = max(1, int(4_000_000 // max(1, ngroups * group_bytes)))
+        for r0 in range(0, h, step):
+            r1 = min(h, r0 + step)
+            out[r0:r1] = _unpack_block(buf[r0:r1], bit_depth, group, group_bytes,
+                                       low_bits, ngroups)
+        flat = out.reshape(h, -1)
+        if flat.shape[1] < width:
+            raise RawReadError("packed 行解出的像素数不足 width")
+        return np.ascontiguousarray(flat[:, :width])
+
+    flat = _unpack_block(buf, bit_depth, group, group_bytes, low_bits, ngroups).reshape(h, -1)
+    if flat.shape[1] < width:
+        raise RawReadError("packed 行解出的像素数不足 width")
+    return np.ascontiguousarray(flat[:, :width])
+
+
+def _unpack_block(buf: np.ndarray, bit_depth: int, group: int, group_bytes: int,
+                  low_bits: int, ngroups: int) -> np.ndarray:
+    """解码一小块 packed 行，返回 (rows, ngroups*group) 的 uint16。"""
+    h = buf.shape[0]
+    groups = buf.reshape(h, ngroups, group_bytes)
     msb = groups[:, :, :group].astype(np.uint16)           # 各像素高 8 位
     if low_bits:
         low_stream = groups[:, :, group:].reshape(h, -1)    # 每行连续低位字节
@@ -208,14 +234,8 @@ def unpack_array(buf: np.ndarray, bit_depth: int, width: int) -> np.ndarray:
         bits = bits.reshape(h, ngroups, group, low_bits)
         weights = (1 << np.arange(low_bits)).astype(np.uint16)   # 字段内低位在前
         low = (bits * weights).sum(axis=3).astype(np.uint16)
-        values = (msb << low_bits) | low
-    else:                                                   # pragma: no cover
-        values = msb
-
-    flat = values.reshape(h, -1)
-    if flat.shape[1] < width:
-        raise RawReadError("packed 行解出的像素数不足 width")
-    return np.ascontiguousarray(flat[:, :width])
+        return ((msb << low_bits) | low).reshape(h, -1)      # (rows, ngroups*group)
+    return msb.reshape(h, -1)                               # pragma: no cover
 
 
 def pack_array(image: np.ndarray, bit_depth: int) -> np.ndarray:
@@ -275,6 +295,15 @@ def _read_bytes(path: str, offset: int, count: int) -> np.ndarray:
             return np.frombuffer(fh.read(count), dtype=np.uint8).copy()
 
 
+def _check_frame_stride(spec: RawLoadSpec):
+    """frame_stride 小于单帧字节数会让相邻帧静默重叠、读出混合数据。"""
+    fb = spec.frame_bytes()
+    if spec.frame_stride_bytes and spec.frame_stride_bytes < fb:
+        raise RawReadError(
+            f"frame_stride({spec.frame_stride_bytes}B) 小于单帧字节数({fb}B)，"
+            f"会导致帧重叠；请填 0（紧凑）或 ≥ 单帧大小")
+
+
 def load_raw(path: str, spec: RawLoadSpec) -> np.ndarray:
     """按 spec 读取一份 RAW，返回 (H, W) 的 uint8/uint16 数组。
 
@@ -283,6 +312,7 @@ def load_raw(path: str, spec: RawLoadSpec) -> np.ndarray:
     """
     if not os.path.exists(path):
         raise RawReadError(f"文件不存在：{path}")
+    _check_frame_stride(spec)
     if spec.packing == "packed":
         return _load_packed(path, spec)
     return _load_unpacked(path, spec)

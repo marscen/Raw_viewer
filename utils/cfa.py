@@ -15,7 +15,7 @@ __all__ = [
     "PATTERNS", "PATTERN_NAMES", "PHASE_LABELS",
     "is_bayer", "normalize_pattern", "channel_index", "channel_map",
     "phase_map", "phase_names", "split_planes", "plane_name_at",
-    "phase_channel", "phase_planes", "channel_gains",
+    "phase_channel", "phase_planes", "stratified_sample", "channel_gains",
 ]
 
 PATTERNS = ("RGGB", "BGGR", "GRBG", "GBRG")
@@ -138,6 +138,24 @@ def phase_channel(pattern):
     if p == "Mono/None":
         return (0, 0, 0, 0)
     return _PHASE_CHANNEL[p]
+
+
+def stratified_sample(values: np.ndarray, limit: int = 1_000_000,
+                      already_flat: bool = False) -> np.ndarray:
+    """对超大数组做**奇步长**抽样，用于百分位/中值这类统计。
+
+    为什么必须是奇步长：Bayer 数据的相位由 (x%2, y%2) 决定，而按行主序展平后
+    用偶数步长抽样会让 x 奇偶性固定 —— 12MP/24MP/48MP/64MP 图算出来的步长全是
+    偶数，结果是 4 个相位只有 2 个进入统计，另外两个通道取不到电平（偏亮的一路
+    被截成纯白、偏暗的一路被压成黑边）。奇步长让 x、y 奇偶性都轮换，四个相位
+    都会被采到。
+    """
+    v = values if already_flat else np.ravel(values)
+    n = v.size
+    if n <= limit:
+        return v
+    step = (n // max(1, int(limit))) | 1        # 强制奇数
+    return v[::step]
 
 
 def channel_gains(pattern) -> dict:
